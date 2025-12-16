@@ -1,18 +1,15 @@
 from fastapi import FastAPI, Header, Request
 import hmac, hashlib, json, os
-from fastapi.responses import FileResponse
 from pathlib import Path
-from fastapi import Request, Response
-from fastapi.responses import StreamingResponse
-import math
-from app.github_comment import comment_on_pr  
+from fastapi.responses import FileResponse, StreamingResponse
 from threading import Thread
 from app.job_runner import run_pipeline
+from app.github_comment import comment_on_pr
 
 app = FastAPI()
 
+# CORS for frontend
 from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -21,23 +18,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # GitHub webhook secret
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
 
-# Path to video
+# Video path
 BASE_DIR = Path(__file__).resolve().parent
-VIDEO_PATH = BASE_DIR / "out.mp4"
+VIDEO_PATH = BASE_DIR / "out_streamable.mp4"
 
+# -------------------------
 # Serve video
-
+# -------------------------
 @app.get("/out.mp4")
 def get_video(request: Request):
-    file_path = VIDEO_PATH
-    if not file_path.exists():
+    if not VIDEO_PATH.exists():
         return {"error": "Video not generated yet"}
 
-    file_size = file_path.stat().st_size
+    file_size = VIDEO_PATH.stat().st_size
     range_header = request.headers.get("range")
     start = 0
     end = file_size - 1
@@ -46,7 +42,7 @@ def get_video(request: Request):
         bytes_range = range_header.replace("bytes=", "").split("-")
         if bytes_range[0]:
             start = int(bytes_range[0])
-        if bytes_range[1]:
+        if len(bytes_range) > 1 and bytes_range[1]:
             end = int(bytes_range[1])
     length = end - start + 1
 
@@ -68,9 +64,11 @@ def get_video(request: Request):
         "Content-Length": str(length),
         "Content-Type": "video/mp4",
     }
-    return StreamingResponse(iterfile(file_path, start, length), status_code=206, headers=headers)
+    return StreamingResponse(iterfile(VIDEO_PATH, start, length), status_code=206, headers=headers)
 
-# Verify GitHub signature
+# -------------------------
+# GitHub webhook
+# -------------------------
 def verify_signature(signature, payload):
     mac = hmac.new(GITHUB_SECRET.encode(), payload, hashlib.sha256)
     return hmac.compare_digest(f"sha256={mac.hexdigest()}", signature)
@@ -83,18 +81,25 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         return {"status": "invalid signature"}
 
     event = json.loads(body)
+    print("📥 PR Event received:", json.dumps(event, indent=2))
 
-    # Only react to PR opened
-    if event.get("action") != "opened":
+    # Only trigger on opened PR
+    action = event.get("action")
+    if action != "opened":
+        print(f"ℹ️ Ignoring PR action: {action}")
         return {"status": "ignored"}
 
     pr_number = event["pull_request"]["number"]
     repo_full_name = event["repository"]["full_name"]
 
     def background_job():
-        run_pipeline()
-        comment_on_pr(repo_full_name, pr_number)
+        try:
+            run_pipeline()
+            comment_on_pr(repo_full_name, pr_number)
+        except Exception as e:
+            print("❌ Background job failed:", e)
 
     Thread(target=background_job).start()
+    print("⏳ Pipeline job started in background")
 
     return {"status": "accepted"}
