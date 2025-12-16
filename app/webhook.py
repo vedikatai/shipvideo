@@ -5,7 +5,9 @@ from pathlib import Path
 from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 import math
-
+from app.github_comment import comment_on_pr  
+from threading import Thread
+from app.job_runner import run_pipeline
 
 app = FastAPI()
 
@@ -73,13 +75,26 @@ def verify_signature(signature, payload):
     mac = hmac.new(GITHUB_SECRET.encode(), payload, hashlib.sha256)
     return hmac.compare_digest(f"sha256={mac.hexdigest()}", signature)
 
-# Webhook endpoint
 @app.post("/webhook")
 async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     body = await request.body()
+
     if not verify_signature(x_hub_signature_256, body):
         return {"status": "invalid signature"}
+
     event = json.loads(body)
-    print("PR Event:", event)
-    # TODO: trigger capture/render job here
-    return {"status": "ok"}
+
+    # Only react to PR opened
+    if event.get("action") != "opened":
+        return {"status": "ignored"}
+
+    pr_number = event["pull_request"]["number"]
+    repo_full_name = event["repository"]["full_name"]
+
+    def background_job():
+        run_pipeline()
+        comment_on_pr(repo_full_name, pr_number)
+
+    Thread(target=background_job).start()
+
+    return {"status": "accepted"}
