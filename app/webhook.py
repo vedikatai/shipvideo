@@ -23,7 +23,7 @@ GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
 
 # Video path
 BASE_DIR = Path(__file__).resolve().parent
-VIDEO_PATH = BASE_DIR / "out_streamable.mp4"
+VIDEO_PATH = BASE_DIR / "/out.mp4"
 
 # -------------------------
 # Serve video
@@ -94,12 +94,17 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
 
     def background_job():
         try:
+            print("🚀 Background job started", flush=True)
             run_pipeline()
+            print("💬 Posting comment to PR", flush=True)
             comment_on_pr(repo_full_name, pr_number)
+            print("✅ Background job completed successfully", flush=True)
         except Exception as e:
-            print("❌ Background job failed:", e)
+            print(f"❌ Background job failed: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
 
     Thread(target=background_job).start()
-    print("⏳ Pipeline job started in background")
+    print("⏳ Pipeline job started in background", flush=True)
 
     return {"status": "accepted"}

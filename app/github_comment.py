@@ -1,7 +1,7 @@
 from github import Github
 import os
 
-VIDEO_URL = "http://localhost:8000/out_streamable.mp4"  # replace if using other filename
+VIDEO_URL = "http://localhost:8000//out.mp4"  # replace if using other filename
 
 def comment_on_pr(repo_full_name: str, pr_number: int):
     try:
