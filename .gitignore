@@ -1,4 +1,23 @@
 .env
 venv
 
-__pycache__
+__pycache__/
+
+
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+app/*.png
+
+
+shot1.png
+app/shot2.png
+out.mp4
+# OS junk
+.DS_Store
