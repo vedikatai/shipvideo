@@ -23,7 +23,7 @@ GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
 
 # Video path
 BASE_DIR = Path(__file__).resolve().parent
-VIDEO_PATH = BASE_DIR / "/out.mp4"
+VIDEO_PATH = BASE_DIR / "out.mp4"
 
 # -------------------------
 # Serve video
