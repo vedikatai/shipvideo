@@ -83,11 +83,23 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     event = json.loads(body)
     print("📥 PR Event received:", json.dumps(event, indent=2))
 
-    # Only trigger on opened PR
+    # Trigger on opened PR or redelivery (action might be missing or different)
     action = event.get("action")
-    if action != "opened":
+    
+    # Check if this is a PR event
+    if "pull_request" not in event:
+        print(f"ℹ️ Not a pull request event, ignoring")
+        return {"status": "ignored"}
+    
+    # Allow opened, synchronize (updates), reopened, or redelivery (no action or ready_for_review)
+    allowed_actions = ["opened", "synchronize", "reopened", "ready_for_review"]
+    if action and action not in allowed_actions:
         print(f"ℹ️ Ignoring PR action: {action}")
         return {"status": "ignored"}
+    
+    # If action is missing (redelivery), allow it
+    if not action:
+        print("ℹ️ No action specified (likely redelivery), proceeding with pipeline")
 
     pr_number = event["pull_request"]["number"]
     repo_full_name = event["repository"]["full_name"]
