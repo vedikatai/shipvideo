@@ -6,7 +6,15 @@ APP_DIR = Path(__file__).resolve().parent
 output_path = APP_DIR / "out.mp4"
 
 os.system(
-    f"ffmpeg -y -loop 1 -t 3 -i shot1.png -loop 1 -t 3 -i shot2.png "
-    f"-filter_complex \"[0:v][1:v]concat=n=2:v=1:a=0[v]\" "
-    f"-map \"[v]\" {output_path}"
+    f"ffmpeg -y "
+    f"-loop 1 -t 3 -i shot1.png "
+    f"-loop 1 -t 3 -i shot2.png "
+    f'-filter_complex "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p" '
+    f"-r 30 "
+    f"-c:v libx264 "
+    f"-profile:v baseline "
+    f"-level 3.0 "
+    f"-pix_fmt yuv420p "
+    f"-movflags +faststart "
+    f"{output_path}"
 )

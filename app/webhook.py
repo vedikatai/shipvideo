@@ -107,9 +107,9 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     def background_job():
         try:
             print("🚀 Background job started", flush=True)
-            run_pipeline()
+            video_url = run_pipeline()
             print("💬 Posting comment to PR", flush=True)
-            comment_on_pr(repo_full_name, pr_number)
+            comment_on_pr(repo_full_name, pr_number, video_url)
             print("✅ Background job completed successfully", flush=True)
         except Exception as e:
             print(f"❌ Background job failed: {type(e).__name__}: {e}", flush=True)

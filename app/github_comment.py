@@ -1,9 +1,15 @@
 from github import Github
 import os
 
-VIDEO_URL = "http://localhost:8000/out.mp4"  # replace if using other filename
-
-def comment_on_pr(repo_full_name: str, pr_number: int):
+def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str):
+    """
+    Posts a comment on a PR with the video URL.
+    
+    Args:
+        repo_full_name: Full name of the repository (e.g., "owner/repo")
+        pr_number: PR number
+        video_url: Public URL of the uploaded video
+    """
     try:
         token = os.getenv("GITHUB_TOKEN")
         if not token:
@@ -13,9 +19,9 @@ def comment_on_pr(repo_full_name: str, pr_number: int):
         pr = repo.get_pull(pr_number)
 
         pr.create_issue_comment(
-            f"🎬 **Auto-generated demo video**\n\n{VIDEO_URL}"
+            f"🎬 **Auto-generated demo video**\n\n{video_url}"
         )
-        print("💬 Comment posted to PR")
+        print(f"💬 Comment posted to PR with video URL: {video_url}")
 
     except Exception as e:
         print("❌ Failed to post comment:", e)
