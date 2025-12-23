@@ -81,15 +81,19 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         return {"status": "invalid signature"}
 
     event = json.loads(body)
-    print("📥 PR Event received:", json.dumps(event, indent=2))
-
-    # Trigger on opened PR or redelivery (action might be missing or different)
-    action = event.get("action")
+    event_type = event.get("action", "unknown")
+    repo = event.get("repository", {}).get("full_name", "unknown")
     
     # Check if this is a PR event
-    if "pull_request" not in event:
-        print(f"ℹ️ Not a pull request event, ignoring")
+    if "pull_request" in event:
+        pr_number = event["pull_request"]["number"]
+        print(f"📥 PR Event: {event_type} - {repo}#{pr_number}", flush=True)
+    else:
+        print(f"📥 Webhook: {event_type} on {repo} (not a PR event)", flush=True)
         return {"status": "ignored"}
+    
+    # Trigger on opened PR or redelivery (action might be missing or different)
+    action = event.get("action")
     
     # Allow opened, synchronize (updates), reopened, or redelivery (no action or ready_for_review)
     allowed_actions = ["opened", "synchronize", "reopened", "ready_for_review"]
@@ -101,8 +105,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     if not action:
         print("ℹ️ No action specified (likely redelivery), proceeding with pipeline")
 
-    pr_number = event["pull_request"]["number"]
-    repo_full_name = event["repository"]["full_name"]
+    repo_full_name = repo  # Already extracted above
 
     def background_job():
         try:
