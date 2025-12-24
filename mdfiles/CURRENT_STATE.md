@@ -181,7 +181,6 @@
 - **Hardcoded Everything**: URLs, button selectors, flows are all hardcoded
 - **Static Screenshots**: Not real video recording, just image slideshow
 - **No Audio**: Silent videos
-- **Localhost Only**: Videos only accessible on local machine
 - **Single Flow**: Can only record one predefined interaction
 - **No Intelligence**: Doesn't understand PR context
 - **No Persistence**: Jobs lost if server restarts
