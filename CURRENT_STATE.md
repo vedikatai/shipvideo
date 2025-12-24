@@ -111,6 +111,10 @@
    - Background processing
    - Basic error handling
 
+   5. **Video Storage r2**
+   - Videos stored r2 cloudfare
+
+
 ---
 
 ## What's Missing ❌
@@ -137,11 +141,7 @@
    - Videos have no audio
    - No professional voiceover
 
-5. **No Video Storage**
-   - Videos stored locally only
-   - Hardcoded localhost URL in comments
-   - No cloud storage (S3/GCS)
-   - Videos not accessible outside local network
+
 
 6. **No Staging Integration**
    - Hardcoded `localhost:3000` URL
