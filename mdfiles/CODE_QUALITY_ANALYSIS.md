@@ -12,7 +12,7 @@
 **Responsibility:** GitHub API interactions
 - ✅ Single responsibility: Post comments to PRs
 - ✅ Clean interface: Takes repo, PR number, video URL
-- ✅ No mixing with other concerns
+- ✅ No mixing with other concerns.
 
 ### 3. **`capture.py`** - Screenshot Capture
 **Responsibility:** Browser automation for screenshots
