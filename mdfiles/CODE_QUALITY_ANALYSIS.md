@@ -8,7 +8,7 @@
 - ✅ Well-encapsulated: All R2 logic in one place
 - ✅ Reusable functions
 
-### 2. **`github_comment.py`** - GitHub API Layer,
+### 2. **`github_comment.py`** - GitHub API Layer
 **Responsibility:** GitHub API interactions
 - ✅ Single responsibility: Post comments to PRs
 - ✅ Clean interface: Takes repo, PR number, video URL
