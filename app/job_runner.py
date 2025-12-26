@@ -8,13 +8,6 @@ APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 
 def run_pipeline():
-    """
-    Runs capture -> render -> upload sequentially.
-    Prints logs for every step.
-    
-    Returns:
-        str: Public URL of the uploaded video
-    """
     try:
         print("▶️ Starting video pipeline", flush=True)
 
