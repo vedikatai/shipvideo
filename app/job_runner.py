@@ -5,6 +5,7 @@ from pathlib import Path
 from app.storage import upload_video
 
 APP_DIR = Path(__file__).resolve().parent
+REPO_ROOT = APP_DIR.parent
 
 def run_pipeline():
     """
@@ -18,11 +19,10 @@ def run_pipeline():
         print("▶️ Starting video pipeline", flush=True)
 
         # 1️⃣ Capture screenshots
-        capture_script = APP_DIR / "capture.py"
-        print(f"📸 Running capture script: {capture_script}", flush=True)
+        print("📸 Running capture module", flush=True)
         result = subprocess.run(
-            ["python3", str(capture_script)],
-            cwd=str(APP_DIR),
+            ["python3", "-m", "app.capture"],
+            cwd=str(REPO_ROOT),
             check=True,
             capture_output=True,
             text=True
@@ -34,11 +34,10 @@ def run_pipeline():
         print("📸 Capture finished", flush=True)
 
         # 2️⃣ Render video
-        render_script = APP_DIR / "render.py"
-        print(f"🎬 Running render script: {render_script}", flush=True)
+        print("🎬 Running render module", flush=True)
         result = subprocess.run(
-            ["python3", str(render_script)],
-            cwd=str(APP_DIR),
+            ["python3", "-m", "app.render"],
+            cwd=str(REPO_ROOT),
             check=True,
             capture_output=True,
             text=True

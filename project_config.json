@@ -1,0 +1,6 @@
+{
+    "project_name": "example-app",
+    "preview_url_template": "http://localhost:3000",
+    "auth": null
+  }
+  
