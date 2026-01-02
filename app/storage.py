@@ -84,7 +84,7 @@ def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
             # Keep the most recent N videos
             if i < max_videos:
                 # Also check age - delete even recent ones if too old
-                # Normalize both datetimes for comparison
+                # Normalize both datetbdimes for comparison
                 last_mod_naive = last_modified.replace(tzinfo=None) if last_modified.tzinfo else last_modified
                 cutoff_naive = cutoff_date.replace(tzinfo=None) if cutoff_date.tzinfo else cutoff_date
                 if last_mod_naive < cutoff_naive:
