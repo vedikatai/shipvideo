@@ -1,6 +1,6 @@
 {
-    "project_name": "example-app",
-    "preview_url_template": "http://localhost:3000",
-    "auth": null
-  }
+  "project_name": "demo-app",
+  "preview_url_template": "https://shipvideo-web.vercel.app",
+  "auth": null
+}
   

@@ -19,7 +19,7 @@ def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str):
         pr = repo.get_pull(pr_number)
 
         pr.create_issue_comment(
-            f"🎬 **Auto-generated demo video**\n\n{video_url}"
+            f"🎬 **Auto-generated demo video for PR #{pr_number}**\n\n{video_url}"
         )
         print(f"💬 Comment posted to PR with video URL: {video_url}")
 

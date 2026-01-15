@@ -137,13 +137,14 @@ def check_storage_usage() -> Tuple[int, float]:
         return 0, 0.0
 
 
-def upload_video(local_path: Path, auto_cleanup: bool = True) -> str:
+def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = None) -> str:
     """
     Upload video to R2 with free tier safeguards.
     
     Args:
         local_path: Path to video file
         auto_cleanup: Automatically clean old videos before upload (default: True)
+        pr_number: Optional PR number to include in filename
     """
     if not local_path.exists():
         raise FileNotFoundError(local_path)
@@ -173,7 +174,10 @@ def upload_video(local_path: Path, auto_cleanup: bool = True) -> str:
     s3_client, bucket_name = get_r2_client()
 
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    object_key = f"videos/{timestamp}_{local_path.name}"
+    if pr_number:
+        object_key = f"videos/pr{pr_number}_{timestamp}_{local_path.name}"
+    else:
+        object_key = f"videos/{timestamp}_{local_path.name}"
 
     print(f"📤 Uploading {object_key} ({file_size_mb:.1f}MB)", flush=True)
 

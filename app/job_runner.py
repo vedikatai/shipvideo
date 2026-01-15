@@ -3,42 +3,35 @@ import os
 import sys
 from pathlib import Path
 from app.storage import upload_video
+from app.capture import capture_demo
+from app.render import render_video
 
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 
-def run_pipeline():
+def run_pipeline(pr_number=None):
+    """
+    Runs capture -> render -> upload sequentially.
+    
+    Args:
+        pr_number: PR number to pass to capture for preview URL resolution.
+    
+    Returns:
+        str: Public URL of the uploaded video
+    """
     try:
         print("▶️ Starting video pipeline", flush=True)
+        if pr_number:
+            print(f"🔢 PR Number: {pr_number}", flush=True)
 
         # 1️⃣ Capture screenshots
         print("📸 Running capture module", flush=True)
-        result = subprocess.run(
-            ["python3", "-m", "app.capture"],
-            cwd=str(REPO_ROOT),
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        if result.stdout:
-            print("Capture stdout:", result.stdout, flush=True)
-        if result.stderr:
-            print("Capture stderr:", result.stderr, flush=True)
+        capture_demo(pr_number=pr_number)
         print("📸 Capture finished", flush=True)
 
         # 2️⃣ Render video
         print("🎬 Running render module", flush=True)
-        result = subprocess.run(
-            ["python3", "-m", "app.render"],
-            cwd=str(REPO_ROOT),
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        if result.stdout:
-            print("Render stdout:", result.stdout, flush=True)
-        if result.stderr:
-            print("Render stderr:", result.stderr, flush=True)
+        render_video()
         print("🎬 Video rendering finished", flush=True)
 
         # 3️⃣ Upload video to R2
@@ -47,7 +40,7 @@ def run_pipeline():
             raise FileNotFoundError(f"Video file not found: {video_path}")
         
         print("☁️ Uploading video to R2...", flush=True)
-        video_url = upload_video(video_path)
+        video_url = upload_video(video_path, pr_number=pr_number)
         print(f"✅ Video uploaded to R2: {video_url}", flush=True)
 
     except subprocess.CalledProcessError as e:
