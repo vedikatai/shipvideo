@@ -9,24 +9,31 @@ from app.render import render_video
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 
-def run_pipeline(pr_number=None):
+def run_pipeline(pr_number: int, preview_url: str):
     """
     Runs capture -> render -> upload sequentially.
     
     Args:
-        pr_number: PR number to pass to capture for preview URL resolution.
+        pr_number: PR number for video naming and comments
+        preview_url: The preview URL to record from (e.g., "https://yourapp-pr456.vercel.app")
     
     Returns:
         str: Public URL of the uploaded video
+    
+    Raises:
+        ValueError: If preview_url is None or empty
     """
+    if not preview_url:
+        raise ValueError("preview_url cannot be None or empty")
+    
     try:
         print("▶️ Starting video pipeline", flush=True)
-        if pr_number:
-            print(f"🔢 PR Number: {pr_number}", flush=True)
+        print(f"🔢 PR Number: {pr_number}", flush=True)
+        print(f"🌐 Preview URL: {preview_url}", flush=True)
 
         # 1️⃣ Capture screenshots
         print("📸 Running capture module", flush=True)
-        capture_demo(pr_number=pr_number)
+        capture_demo(preview_url=preview_url)
         print("📸 Capture finished", flush=True)
 
         # 2️⃣ Render video

@@ -1,6 +1,6 @@
 {
   "project_name": "demo-app",
-  "preview_url_template": "https://shipvideo-web.vercel.app",
+  "preview_url_template": "https://shipvideo-demo.vercel.app",
   "auth": null
 }
   

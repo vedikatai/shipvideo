@@ -11,8 +11,8 @@ def render_video():
 
     os.system(
         f"ffmpeg -y "
-        f"-loop 1 -t 3 -i {shot1_path} "
-        f"-loop 1 -t 3 -i {shot2_path} "
+            f"-loop 1 -t 3 -i {shot1_path} "
+            f"-loop 1 -t 3 -i {shot2_path} "
         f'-filter_complex "[0:v][1:v]concat=n=2:v=1:a=0,format=yuv420p" '
         f"-r 30 "
         f"-c:v libx264 "

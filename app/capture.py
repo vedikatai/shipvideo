@@ -2,35 +2,21 @@ import os
 import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright
-from app.config import load_config
 
 APP_DIR = Path(__file__).resolve().parent
 
-def capture_demo(pr_number=None):
+def capture_demo(preview_url: str):
     """
     Capture screenshots from preview environment.
     
     Args:
-        pr_number: PR number to use in preview URL template. If None, reads from PR_NUMBER env var.
+        preview_url: The preview URL to record from (e.g., "https://yourapp-pr456.vercel.app")
+    
+    Raises:
+        ValueError: If preview_url is None or empty
     """
-    config = load_config()
-    template = config["preview_url_template"]
-    
-    # Get PR number from parameter or environment variable
-    if pr_number is None:
-        pr_number = os.getenv("PR_NUMBER")
-    
-    # Format the URL template with PR number
-    if pr_number:
-        try:
-            preview_url = template.format(pr_number=pr_number)
-        except KeyError:
-            # Template doesn't have {pr_number} placeholder, use as-is
-            print(f"⚠️ Template doesn't have {{pr_number}} placeholder, using template as-is", flush=True)
-            preview_url = template
-    else:
-        # Fallback: use template as-is if no PR number (for backward compatibility)
-        preview_url = template
+    if not preview_url:
+        raise ValueError("preview_url cannot be None or empty")
     
     print(f"🌐 Navigating to preview URL: {preview_url}", flush=True)
     
@@ -44,8 +30,11 @@ def capture_demo(pr_number=None):
         browser.close()
 
 if __name__ == "__main__":
-    # Support both direct call and module execution
-    pr_number = os.getenv("PR_NUMBER")
+    # Support direct call for testing
     if len(sys.argv) > 1:
-        pr_number = sys.argv[1]
-    capture_demo(pr_number=pr_number)
+        preview_url = sys.argv[1]
+    else:
+        preview_url = os.getenv("PREVIEW_URL")
+        if not preview_url:
+            raise ValueError("PREVIEW_URL environment variable or command line argument required")
+    capture_demo(preview_url=preview_url)

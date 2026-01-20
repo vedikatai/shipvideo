@@ -1,14 +1,15 @@
 from github import Github
 import os
 
-def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str):
+def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, error_message: str = None):
     """
-    Posts a comment on a PR with the video URL.
+    Posts a comment on a PR with the video URL or error message.
     
     Args:
         repo_full_name: Full name of the repository (e.g., "owner/repo")
         pr_number: PR number
-        video_url: Public URL of the uploaded video
+        video_url: Public URL of the uploaded video (optional if error_message is provided)
+        error_message: Error message to post (optional if video_url is provided)
     """
     try:
         token = os.getenv("GITHUB_TOKEN")
@@ -18,10 +19,18 @@ def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str):
         repo = g.get_repo(repo_full_name)
         pr = repo.get_pull(pr_number)
 
-        pr.create_issue_comment(
-            f"🎬 **Auto-generated demo video for PR #{pr_number}**\n\n{video_url}"
-        )
-        print(f"💬 Comment posted to PR with video URL: {video_url}")
+        if video_url:
+            comment_text = f"🎬 **Auto-generated demo video for PR #{pr_number}**\n\n{video_url}"
+        elif error_message:
+            comment_text = error_message
+        else:
+            raise ValueError("Either video_url or error_message must be provided")
+
+        pr.create_issue_comment(comment_text)
+        if video_url:
+            print(f"💬 Comment posted to PR with video URL: {video_url}")
+        else:
+            print(f"💬 Comment posted to PR with error message")
 
     except Exception as e:
         print("❌ Failed to post comment:", e)
