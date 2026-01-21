@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from threading import Thread
 from app.job_runner import run_pipeline
 from app.github_comment import comment_on_pr
-from app.preview_url_resolver import resolve_preview_url_for_pr
+from app.preview_url_resolver import get_preview_url
 
 app = FastAPI()
 
@@ -112,22 +112,22 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         try:
             print("🚀 Background job started", flush=True)
             
-            # Resolve preview URL from GitHub commit statuses
-            print(f"🔍 Resolving preview URL for PR #{pr_number}...", flush=True)
+            # Get preview URL from config
+            print("🔍 Getting preview URL from config...", flush=True)
             try:
-                preview_url = resolve_preview_url_for_pr(pr_number, repo_full_name)
-                print(f"✅ Resolved preview URL: {preview_url}", flush=True)
+                preview_url = get_preview_url()
+                print(f"✅ Using preview URL: {preview_url}", flush=True)
             except ValueError as e:
-                print(f"❌ Cannot resolve preview URL: {e}", flush=True)
+                print(f"❌ Cannot get preview URL: {e}", flush=True)
                 # Post a comment explaining the issue
-                error_message = f"⚠️ **Demo video not generated**\n\n{e}\n\nPlease ensure:\n1. The PR has been deployed to Vercel/Netlify\n2. Deployment status is posted to GitHub"
+                error_message = f"⚠️ **Demo video not generated**\n\n{e}"
                 comment_on_pr(repo_full_name, pr_number, None, error_message)
                 return
             except Exception as e:
-                print(f"❌ Error resolving preview URL: {type(e).__name__}: {e}", flush=True)
+                print(f"❌ Error getting preview URL: {type(e).__name__}: {e}", flush=True)
                 raise
             
-            # Run pipeline with resolved preview URL
+            # Run pipeline with preview URL
             video_url = run_pipeline(pr_number=pr_number, preview_url=preview_url)
             print("💬 Posting comment to PR", flush=True)
             comment_on_pr(repo_full_name, pr_number, video_url)
