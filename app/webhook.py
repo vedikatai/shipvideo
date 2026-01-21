@@ -6,6 +6,7 @@ from threading import Thread
 from app.job_runner import run_pipeline
 from app.github_comment import comment_on_pr
 from app.preview_url_resolver import get_preview_url
+from app.templates import match_template
 
 app = FastAPI()
 
@@ -86,8 +87,11 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     repo = event.get("repository", {}).get("full_name", "unknown")
     
     # Check if this is a PR event
+    pr_title = None
     if "pull_request" in event:
-        pr_number = event["pull_request"]["number"]
+        pr = event["pull_request"]
+        pr_number = pr["number"]
+        pr_title = pr.get("title")
         print(f"📥 PR Event: {event_type} - {repo}#{pr_number}", flush=True)
     else:
         print(f"📥 Webhook: {event_type} on {repo} (not a PR event)", flush=True)
@@ -127,8 +131,15 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 print(f"❌ Error getting preview URL: {type(e).__name__}: {e}", flush=True)
                 raise
             
-            # Run pipeline with preview URL
-            video_url = run_pipeline(pr_number=pr_number, preview_url=preview_url)
+            # Choose capture template based on PR title
+            template = match_template(pr_title)
+
+            # Run pipeline with preview URL and steps
+            video_url = run_pipeline(
+                pr_number=pr_number,
+                preview_url=preview_url,
+                steps=template["steps"],
+            )
             print("💬 Posting comment to PR", flush=True)
             comment_on_pr(repo_full_name, pr_number, video_url)
             print("✅ Background job completed successfully", flush=True)

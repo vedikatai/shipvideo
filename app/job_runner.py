@@ -9,13 +9,14 @@ from app.render import render_video
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 
-def run_pipeline(pr_number: int, preview_url: str):
+def run_pipeline(pr_number: int, preview_url: str, steps=None):
     """
     Runs capture -> render -> upload sequentially.
     
     Args:
         pr_number: PR number for video naming and comments
         preview_url: The preview URL to record from (e.g., "https://yourapp-pr456.vercel.app")
+        steps: Optional list of capture steps to drive the demo flow
     
     Returns:
         str: Public URL of the uploaded video
@@ -33,7 +34,7 @@ def run_pipeline(pr_number: int, preview_url: str):
 
         # 1️⃣ Capture screenshots
         print("📸 Running capture module", flush=True)
-        capture_demo(preview_url=preview_url)
+        capture_demo(preview_url=preview_url, steps=steps)
         print("📸 Capture finished", flush=True)
 
         # 2️⃣ Render video
