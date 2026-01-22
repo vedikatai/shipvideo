@@ -25,15 +25,6 @@ TEMPLATES = {
 
 
 def match_template(pr_title: str):
-    """
-    Match a PR title to a demo template using simple keyword matching.
-    
-    Args:
-        pr_title: The PR title to match against
-        
-    Returns:
-        dict: Template dictionary with "steps" key containing list of actions
-    """
     title = (pr_title or "").lower()
 
     if "billing" in title:
