@@ -1,10 +1,3 @@
-"""
-Demo video capture templates.
-
-Templates define the sequence of actions (screenshots, clicks, navigation)
-to perform when recording a demo video for a PR.
-"""
-
 TEMPLATES = {
     # Billing flow: capture home page, then navigate to /billing
     "billing": {
