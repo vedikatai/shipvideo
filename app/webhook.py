@@ -1,12 +1,14 @@
 from fastapi import FastAPI, Header, Request
 import hmac, hashlib, json, os
 from pathlib import Path
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from threading import Thread
 from app.job_runner import run_pipeline
 from app.github_comment import comment_on_pr
-from app.preview_url_resolver import get_preview_url
-from app.templates import match_template
+from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
+from app.config import load_config
+import time
+from app.pr_analyzer import generate_steps_from_diff_with_fallback
 
 app = FastAPI()
 
@@ -111,34 +113,50 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         print("ℹ️ No action specified (likely redelivery), proceeding with pipeline")
 
     repo_full_name = repo  # Already extracted above
+    pr_branch = (pr.get("head") or {}).get("ref") if "pull_request" in event else None
 
     def background_job():
         try:
             print("🚀 Background job started", flush=True)
             
-            # Get preview URL from config
-            print("🔍 Getting preview URL from config...", flush=True)
+            # Wait for deployment to finish (simple fixed delay)
+            delay = load_config().get("deployment_delay_seconds", 0)
+            if delay > 0:
+                print(f"⏳ Waiting {delay}s for deployment to finish...", flush=True)
+                time.sleep(delay)
+                print("✅ Delay complete, starting pipeline", flush=True)
+            
+            print("🔍 Resolving preview URL...", flush=True)
             try:
-                preview_url = get_preview_url()
-                print(f"✅ Using preview URL: {preview_url}", flush=True)
+                preview_url = get_preview_url(pr_number=pr_number, branch=pr_branch)
             except ValueError as e:
                 print(f"❌ Cannot get preview URL: {e}", flush=True)
-                # Post a comment explaining the issue
                 error_message = f"⚠️ **Demo video not generated**\n\n{e}"
                 comment_on_pr(repo_full_name, pr_number, None, error_message)
                 return
             except Exception as e:
                 print(f"❌ Error getting preview URL: {type(e).__name__}: {e}", flush=True)
                 raise
-            
-            # Choose capture template based on PR title
-            template = match_template(pr_title)
 
-            # Run pipeline with preview URL and steps
+            if not wait_for_preview_ready(preview_url):
+                error_message = (
+                    "⚠️ **Demo video not generated**\n\n"
+                    "Preview deployment did not become ready in time. "
+                    "Try re-running after your preview (e.g. Vercel) has finished building."
+                )
+                comment_on_pr(repo_full_name, pr_number, None, error_message)
+                return
+            
+            steps = generate_steps_from_diff_with_fallback(
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                pr_title=pr_title
+            )
+
             video_url = run_pipeline(
                 pr_number=pr_number,
                 preview_url=preview_url,
-                steps=template["steps"],
+                steps=steps,
             )
             print("💬 Posting comment to PR", flush=True)
             comment_on_pr(repo_full_name, pr_number, video_url)
