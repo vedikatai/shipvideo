@@ -1,2 +1,15 @@
-boto3
+# API / LLM
+anthropic
+
+# GitHub
 PyGithub
+
+# Storage (R2/S3)
+boto3
+
+# Web server
+fastapi
+uvicorn[standard]
+
+# Browser automation (capture)
+playwright
