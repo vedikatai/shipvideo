@@ -13,7 +13,7 @@ DEFAULT_STEPS = [
 
 
 def _resolve_url(preview_url: str, url: str) -> str:
-    """Resolve a possibly-relative URL against the preview base URL."""
+    """Resolve a possisbly-relative URL against the preview base URL."""
     if not url:
         return preview_url
     if url.startswith("http://") or url.startswith("https://"):
