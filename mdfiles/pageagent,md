@@ -1,0 +1,417 @@
+Below is a **practical integration roadmap** to add **PageAgent** into your Playwright-based capture system. The goal is **not replacing Playwright**, but **adding an AI layer that helps recover from selector failures**. Treat this as **phases you can implement and validate one by one**.
+
+---
+
+# Target Architecture
+
+```
+GitHub PR
+   ↓
+Step Generator (path-based)
+   ↓
+Capture Engine (Playwright)
+   ↓
+Smart Action Layer
+   ├─ Try deterministic selector
+   ├─ If fail → PageAgent reasoning
+   └─ Return corrected selector
+   ↓
+Playwright executes action
+   ↓
+Screenshots
+   ↓
+FFmpeg → Video
+   ↓
+Upload → R2
+   ↓
+Comment on PR
+```
+
+**Key idea:**
+Playwright = execution engine
+PageAgent = **UI reasoning assistant**
+
+---
+
+# Phase 0 — Baseline (current system)
+
+You already have:
+
+```
+capture.py
+   page.goto()
+   page.click(selector)
+   page.screenshot()
+```
+
+Selectors fail when UI changes.
+
+Before integrating anything, **add logging**.
+
+Example:
+
+```python
+logger.info(f"Executing step: {step}")
+```
+
+You need visibility before adding AI.
+
+**Success criteria**
+
+* Logs clearly show which step fails
+* Selector failures are detectable
+
+---
+
+# Phase 1 — Introduce a Smart Action Wrapper
+
+Replace direct Playwright calls with a wrapper.
+
+Before:
+
+```python
+await page.click(step["selector"])
+```
+
+After:
+
+```python
+await smart_click(page, step)
+```
+
+Wrapper skeleton:
+
+```python
+async def smart_click(page, step):
+    try:
+        await page.click(step["selector"], timeout=2000)
+        return
+    except:
+        pass
+
+    # fallback logic here
+    raise Exception("Click failed")
+```
+
+**Success criteria**
+
+* Your pipeline still works normally
+* Failures now go through the wrapper
+
+---
+
+# Phase 2 — Extract Interactive DOM Elements
+
+PageAgent needs **a structured representation of clickable elements**.
+
+Add a helper:
+
+```python
+async def extract_interactive_elements(page):
+    return await page.evaluate("""
+    () => {
+        const elements = [...document.querySelectorAll('button, a, [role="button"], input[type=button]')];
+        return elements.map((el, index) => ({
+            index,
+            text: el.innerText || "",
+            aria: el.getAttribute('aria-label') || "",
+            id: el.id || "",
+            class: el.className || "",
+            tag: el.tagName
+        }));
+    }
+    """)
+```
+
+Example result:
+
+```json
+[
+  {"index":0,"text":"Billing","id":"billing-btn"},
+  {"index":1,"text":"Settings","id":"settings-link"}
+]
+```
+
+**Success criteria**
+
+* Your system can print detected UI elements
+* Elements are meaningful
+
+---
+
+# Phase 3 — Add PageAgent Reasoning Service
+
+PageAgent runs in Node. Create a **small microservice**.
+
+Architecture:
+
+```
+Python capture engine
+      ↓ HTTP
+Node PageAgent service
+      ↓
+LLM reasoning
+      ↓
+Best element index
+```
+
+Example API request:
+
+```json
+{
+ "intent": "open billing page",
+ "elements": [...]
+}
+```
+
+Response:
+
+```json
+{
+ "element_index": 0
+}
+```
+
+Node service pseudocode:
+
+```javascript
+app.post("/resolve-click", async (req,res)=>{
+  const {intent,elements} = req.body
+
+  const prompt = `
+User intent: ${intent}
+
+Elements:
+${JSON.stringify(elements)}
+
+Return the index of the best element to click.
+`
+
+  const result = await llm(prompt)
+
+  res.json({element_index: result})
+})
+```
+
+---
+
+# Phase 4 — Integrate PageAgent Fallback
+
+Extend `smart_click`.
+
+Example:
+
+```python
+async def smart_click(page, step):
+
+    # attempt selector
+    if "selector" in step:
+        try:
+            await page.click(step["selector"], timeout=2000)
+            return
+        except:
+            pass
+
+    # fallback to intent
+    if "intent" in step:
+
+        elements = await extract_interactive_elements(page)
+
+        response = await call_pageagent(
+            intent=step["intent"],
+            elements=elements
+        )
+
+        element = elements[response["element_index"]]
+
+        selector = f"{element['tag']}#{element['id']}" if element["id"] else None
+
+        if selector:
+            await page.click(selector)
+            return
+
+    raise Exception("Click failed")
+```
+
+**Success criteria**
+
+* Selector failures trigger PageAgent
+* PageAgent resolves correct element sometimes
+
+---
+
+# Phase 5 — Improve Step Generation
+
+Your current system only generates:
+
+```
+goto route
+screenshot
+```
+
+Add **intent-based click steps**.
+
+Example step:
+
+```json
+{
+ "type": "click",
+ "intent": "open billing page"
+}
+```
+
+Now PageAgent can reason.
+
+---
+
+# Phase 6 — Add Confidence Guard
+
+AI mistakes happen.
+
+Add confidence checks.
+
+Example rule:
+
+```
+If multiple elements contain same text
+→ skip click
+```
+
+Example:
+
+```python
+matches = [e for e in elements if "billing" in e["text"].lower()]
+
+if len(matches) > 1:
+    raise Exception("Ambiguous UI")
+```
+
+---
+
+# Phase 7 — Record Working Flows
+
+The **best reliability improvement**:
+
+Store successful flows.
+
+Example:
+
+```
+PR #21 used flow:
+goto /billing
+click #export-btn
+screenshot
+```
+
+Reuse that for future PRs.
+
+PageAgent becomes fallback only.
+
+---
+
+# Expected Reliability Improvements
+
+| method                         | success |
+| ------------------------------ | ------- |
+| selectors only                 | ~70%    |
+| selectors + text match         | ~80%    |
+| selectors + PageAgent fallback | ~90%    |
+
+---
+
+# Prompt for Cursor
+
+Give Cursor something like this:
+
+```
+We need to integrate PageAgent-based UI reasoning into our Playwright capture engine.
+
+Current architecture:
+
+- FastAPI webhook receives GitHub PR events
+- pr_analyzer generates steps
+- capture.py executes steps using Playwright
+- steps include "goto", "click", "screenshot"
+- click steps currently rely on CSS selectors only
+
+Goal:
+
+Improve click reliability by adding a PageAgent-based fallback.
+
+Implementation plan:
+
+1. Create a wrapper function smart_click(page, step) in capture.py.
+
+2. smart_click should:
+   - try page.click(step["selector"]) first
+   - if it fails, extract interactive DOM elements
+   - send those elements + step["intent"] to a PageAgent service
+   - receive the best matching element
+   - click it with Playwright
+
+3. Implement extract_interactive_elements(page) that returns:
+   - tag
+   - innerText
+   - aria-label
+   - id
+   - class
+   - index
+
+4. Modify step schema to allow:
+
+{
+ "type": "click",
+ "selector": "#btn"
+}
+
+OR
+
+{
+ "type": "click",
+ "intent": "open billing page"
+}
+
+5. Create a PageAgent resolver service endpoint:
+
+POST /resolve-click
+
+Input:
+{
+ "intent": "...",
+ "elements": [...]
+}
+
+Output:
+{
+ "element_index": number
+}
+
+6. smart_click should map the returned index to a selector and click it.
+
+Constraints:
+
+- Playwright remains the execution engine.
+- PageAgent is used only as fallback reasoning.
+- Avoid sending full DOM; send only interactive elements.
+- Maintain existing screenshot and rendering pipeline.
+```
+
+---
+
+# Final Advice
+
+Your **current architecture is already good**. The main improvements will come from:
+
+1. **intent-based steps**
+2. **selector recovery**
+3. **flow reuse**
+
+PageAgent helps with **#2**, not everything.
+
+---
+
+If you want, I can also show:
+
+* **a production-grade PageAgent + Playwright architecture used by real AI browser agents**
+* **how to push your automation reliability past ~95%**
+* **a feature that would make ShipVideo instantly impressive to developers.**
