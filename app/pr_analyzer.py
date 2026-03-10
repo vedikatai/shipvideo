@@ -1,243 +1,215 @@
 """
-Analyzes PR diffs to generate dynamic capture steps based on code changes.
-Eliminates the need for hardcoded templates by understanding what actually changed.
+Analyzes PR diffs to generate dynamic capture flows (steps + narration)
+using an LLM over the real code diff.
 """
 import os
-import re
-from typing import List, Dict, Optional
-from github import Github
+from typing import List, Dict, Optional, Any
 
+import json
+import requests
+from groq import Groq
 
-def fetch_pr_files(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
+from app.step_normalizer import validate_steps, normalize_steps
+
+groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+MAX_DIFF_CHARS = 8000
+
+def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
     """
-    Fetches changed files for a PR using GitHub API.
-    
-    Args:
-        repo_full_name: Full name of the repository (e.g., "owner/repo")
-        pr_number: PR number
-    
-    Returns:
-        List of dicts with 'filename', 'status' (added/modified/deleted), and 'path'
+    Fetches changed files and their diffs for a PR using the GitHub REST API.
+
+    Each item has:
+      - path: "app/pricing/page.tsx"
+      - status: "added" | "modified" | "removed" | "renamed"
+      - patch: unified diff (truncated)
     """
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise ValueError("GITHUB_TOKEN not set in .env")
-    
-    g = Github(token)
-    repo = g.get_repo(repo_full_name)
-    pr = repo.get_pull(pr_number)
-    
-    # Get changed files using PyGithub's get_files() method
-    files = []
-    for file in pr.get_files():
-        # Map GitHub status to our status
-        status_map = {
-            'added': 'added',
-            'modified': 'modified',
-            'removed': 'deleted',
-            'renamed': 'modified',  # Treat renamed as modified
-        }
-        status = status_map.get(file.status, 'modified')
-        
-        files.append({
-            'filename': file.filename.split('/')[-1],
-            'path': file.filename,
-            'status': status
-        })
-    
-    return files
+
+    result: List[Dict[str, str]] = []
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/files"
+    headers = {"Authorization": f"token {token}"}
+
+    page = 1
+    per_page = 100
+    while True:
+        resp = requests.get(url, headers=headers, params={"page": page, "per_page": per_page})
+        files = resp.json()
+        if not files:
+            break
+
+        for f in files:
+            patch = f.get("patch", "") or ""
+            # truncate large diffs - LLM doesn't need 2000+ lines
+            if len(patch) > 3000:
+                patch = patch[:3000] + "\n... (truncated)"
+            result.append(
+                {
+                    "path": f["filename"],
+                    "status": f["status"],
+                    "patch": patch,
+                }
+            )
+            print(f"   [route-diff] file: {f['filename']} ({f['status']})", flush=True)
+
+        if len(files) < per_page:
+            break
+        page += 1
+    print(f"[route-diff] fetched {len(result)} changed files", flush=True)
+    return result
 
 
-
-
-def detect_routes(changed_files: List[Dict[str, str]]) -> List[str]:
+def generate_steps_from_diff(diff_files: List[Dict[str, str]], pr_title: Optional[str]) -> Dict[str, Any]:
     """
-    Detects routes/pages that were changed based on file paths.
-    Supports Next.js App Router, Pages Router, and common patterns.
-    
-    Args:
-        changed_files: List of changed file dicts
-    
-    Returns:
-        List of route paths (e.g., ['/billing', '/dashboard'])
+    Phase 1 brain: takes real diff files + PR title and returns
+    a flow dict with:
+      - steps: list of capture steps for capture_demo()
+      - narration: string script describing the demo
+
+    Uses Groq LLM and falls back deterministically on failure.
     """
-    routes = []
-    
-    for file in changed_files:
-        path = file['path']
-        
-        # Next.js App Router: app/[route]/page.tsx or app/[route]/page.jsx
-        match = re.search(r'app/([^/]+)/page\.(tsx|jsx|ts|js)$', path)
-        if match:
-            route = '/' + match.group(1)
-            if route not in routes:
-                routes.append(route)
-        
-        # Next.js Pages Router: pages/[route].tsx or pages/[route]/index.tsx
-        match = re.search(r'pages/([^/]+)(?:/index)?\.(tsx|jsx|ts|js)$', path)
-        if match:
-            route = '/' + match.group(1)
-            if route == '/index':
-                route = '/'
-            if route not in routes:
-                routes.append(route)
-        
-        # React Router or similar: src/pages/[route].tsx
-        match = re.search(r'src/pages/([^/]+)\.(tsx|jsx|ts|js)$', path)
-        if match:
-            route = '/' + match.group(1).lower()
-            if route not in routes:
-                routes.append(route)
-        
-        # Look for route definitions in the path
-        if 'route' in path.lower() or 'page' in path.lower():
-            # Try to extract route from path structure
-            parts = path.split('/')
-            for i, part in enumerate(parts):
-                if part in ['pages', 'app', 'routes'] and i + 1 < len(parts):
-                    route = '/' + parts[i + 1].replace('.tsx', '').replace('.jsx', '').replace('.ts', '').replace('.js', '')
-                    if route != '/' and route not in routes:
-                        routes.append(route)
-    
-    return routes
+    fallback_steps: List[Dict[str, Any]] = [{"action": "screenshot"}]
+    fallback_narration = (
+        f"Demo screenshot for pull request: {pr_title}."
+        if pr_title
+        else "Demo screenshot for this pull request."
+    )
+
+    try:
+        print("🧠 [route-diff] Calling Groq LLM for step generation...", flush=True)
+
+        # Compact view of diffs for the prompt
+        diffs_for_prompt = [
+            {
+                "path": f["path"],
+                "status": f["status"],
+                "patch": f.get("patch", ""),
+            }
+            for f in diff_files
+        ]
+
+        diff_text = json.dumps(diffs_for_prompt, ensure_ascii=False)
+        if len(diff_text) > MAX_DIFF_CHARS:
+            diff_text = diff_text[:MAX_DIFF_CHARS]
+            print(
+                f"[route-diff] Truncated diff payload for LLM to {MAX_DIFF_CHARS} characters",
+                flush=True,
+            )
+
+        system_msg = (
+            "You are a tool that generates a short UI demo flow for a pull request.\n"
+            "Return STRICT JSON ONLY with the shape:\n"
+            '{\"steps\": [...], \"narration\": \"...\"}.\n'
+            "Each step is a simple object like {\"action\": \"screenshot\"} or "
+            "{ \"action\": \"goto\", \"url\": \"/billing\" }.\n"
+            "Do not include any markdown or explanations."
+        )
+
+        user_msg = json.dumps(
+            {
+                "title": pr_title,
+                "diff_files_json": diff_text,
+            },
+            ensure_ascii=False,
+        )
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+
+        try:
+            completion = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.2,
+            )
+        except Exception:
+            completion = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                temperature=0.2,
+            )
+
+        content = completion.choices[0].message.content or ""
+
+        # Strip markdown code fences if present
+        text = content.strip()
+        if text.startswith("```"):
+            parts = text.split("```")
+            if len(parts) >= 3:
+                text = parts[1]
+                # Drop optional language tag line
+                if "\n" in text:
+                    first_line, rest = text.split("\n", 1)
+                    if first_line.strip().lower() in ("json", "javascript"):
+                        text = rest
+            text = text.strip()
+
+        # If the model added explanations, try to slice out the JSON object only.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+
+        data = json.loads(text)
+        steps = data.get("steps") or fallback_steps
+
+        # Validate + normalize before handing off to executor
+        validated = validate_steps(steps)
+        if not validated:
+            validated = fallback_steps
+        normalized = normalize_steps(validated)
+        if not normalized:
+            normalized = fallback_steps
+
+        narration = data.get("narration") or fallback_narration
+        print(f"[route-diff] steps: {normalized}", flush=True)
+        print(f"✅ [route-diff] Groq LLM returned {len(normalized)} steps", flush=True)
+        return {"steps": normalized, "narration": narration}
+
+    except Exception as e:
+        print(f"❌ [route-diff] Groq step generation failed: {type(e).__name__}: {e}", flush=True)
+        return {"steps": fallback_steps, "narration": fallback_narration}
 
 
-def detect_components(changed_files: List[Dict[str, str]]) -> List[str]:
+def analyze_pr(repo_full_name: str, pr_number: int, pr_title: Optional[str]) -> Dict[str, Any]:
     """
-    Detects React components that were changed.
-    
-    Args:
-        changed_files: List of changed file dicts
-    
-    Returns:
-        List of component names (e.g., ['Button', 'Dashboard'])
-    """
-    components = []
-    
-    for file in changed_files:
-        filename = file['filename']
-        path = file['path']
-        
-        # React component files: ComponentName.tsx, ComponentName.jsx
-        if filename.endswith(('.tsx', '.jsx')) and 'component' in path.lower():
-            component_name = filename.replace('.tsx', '').replace('.jsx', '')
-            if component_name not in components:
-                components.append(component_name)
-        
-        # Also check for common component patterns
-        if '/components/' in path or '/Components/' in path:
-            component_name = filename.replace('.tsx', '').replace('.jsx', '').replace('.ts', '').replace('.js', '')
-            if component_name not in components:
-                components.append(component_name)
-    
-    return components
-
-
-def generate_steps_from_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, any]]:
-    """
-    Analyzes PR diff and generates capture steps dynamically.
-    
-    Args:
-        repo_full_name: Full name of the repository
-        pr_number: PR number
-    
-    Returns:
-        List of step dictionaries for capture_demo()
+    Main Phase 1 entrypoint.
+    - Fetches real diff files
+    - Calls LLM (stubbed for now) to generate steps + narration
+    - Provides deterministic fallback on failure
     """
     try:
-        print(f"🔍 Fetching PR files for {repo_full_name}#{pr_number}...", flush=True)
-        changed_files = fetch_pr_files(repo_full_name, pr_number)
-        
-        if not changed_files:
-            print("⚠️ No changed files detected, using default steps", flush=True)
-            return [{"action": "screenshot"}]
-        
-        print(f"📁 Found {len(changed_files)} changed file(s)", flush=True)
-        for file in changed_files:
-            print(f"   - {file['path']} ({file['status']})", flush=True)
-        
-        # Detect routes and components
-        routes = detect_routes(changed_files)
-        components = detect_components(changed_files)
-        
-        print(f"🛣️ Detected routes: {routes}", flush=True)
-        print(f"🧩 Detected components: {components}", flush=True)
-        
-        # Generate steps based on what we found
-        steps = []
-        
-        # Always start with a screenshot of the home page
-        steps.append({"action": "screenshot"})
-        
-        # If we found routes, navigate to each one
-        if routes:
-            for route in routes:
-                steps.append({"action": "goto", "url": route})
-                steps.append({"action": "screenshot"})
-        else:
-            # If no routes but we have components, try to find them on the page
-            # For now, just take another screenshot
-            # In the future, we could try to find and interact with components
-            steps.append({"action": "screenshot"})
-        
-        # If we only found components (no routes), we might want to interact with them
-        # This is a future enhancement - for now we just take screenshots
-        
-        print(f"✅ Generated {len(steps)} capture steps from diff analysis", flush=True)
-        return steps
-        
+        print(f"🔍 [route-diff] Fetching PR diff for {repo_full_name}#{pr_number}...", flush=True)
+        diff_files = fetch_pr_diff(repo_full_name, pr_number)
+
+        if not diff_files:
+            print("⚠️ [route-diff] No diff files, using default single screenshot", flush=True)
+            return {
+                "steps": [{"action": "screenshot"}],
+                "narration": "Demo screenshot for this pull request.",
+            }
+
+        print(f"📁 [route-diff] Found {len(diff_files)} diff file(s)", flush=True)
+        for f in diff_files:
+            print(f"   - {f['path']} ({f['status']})", flush=True)
+
+        flow = generate_steps_from_diff(diff_files, pr_title)
+        steps = flow.get("steps") or [{"action": "screenshot"}]
+        narration = flow.get("narration") or "Demo screenshot for this pull request."
+
+        print(f"✅ [route-diff] Generated {len(steps)} steps from diff", flush=True)
+        return {"steps": steps, "narration": narration}
+
     except Exception as e:
-        print(f"❌ Error analyzing PR diff: {type(e).__name__}: {e}", flush=True)
+        print(f"❌ [route-diff] Error analyzing PR diff: {type(e).__name__}: {e}", flush=True)
         import traceback
+
         traceback.print_exc()
-        # Fallback to default steps
-        print("🔄 Falling back to default steps", flush=True)
-        return [{"action": "screenshot"}]
-
-
-def generate_steps_from_diff_with_fallback(repo_full_name: str, pr_number: int, pr_title: Optional[str] = None) -> List[Dict[str, any]]:
-    """
-    Generates steps from diff with intelligent fallback.
-    If diff analysis fails or produces no useful results, falls back to title-based heuristics.
-    
-    Args:
-        repo_full_name: Full name of the repository
-        pr_number: PR number
-        pr_title: Optional PR title for fallback
-    
-    Returns:
-        List of step dictionaries for capture_demo()
-    """
-    steps = generate_steps_from_diff(repo_full_name, pr_number)
-    
-    # If we only got one screenshot (default fallback), try title-based heuristics
-    if len(steps) == 1 and steps[0].get("action") == "screenshot" and pr_title:
-        print("🔄 Trying title-based fallback...", flush=True)
-        title_lower = pr_title.lower()
-        
-        # Simple keyword matching as fallback
-        if "billing" in title_lower:
-            steps = [
-                {"action": "screenshot"},
-                {"action": "goto", "url": "/billing"},
-                {"action": "screenshot"},
-            ]
-        elif "dashboard" in title_lower:
-            steps = [
-                {"action": "screenshot"},
-                {"action": "goto", "url": "/dashboard"},
-                {"action": "screenshot"},
-            ]
-        else:
-            # Try to extract route from title
-            # Look for patterns like "Add /settings page" or "Update billing page"
-            route_match = re.search(r'[/]([a-z-]+)', title_lower)
-            if route_match:
-                route = '/' + route_match.group(1)
-                steps = [
-                    {"action": "screenshot"},
-                    {"action": "goto", "url": route},
-                    {"action": "screenshot"},
-                ]
-    
-    return steps
+        # Deterministic fallback
+        return {
+            "steps": [{"action": "screenshot"}],
+            "narration": "Demo screenshot for this pull request (fallback).",
+        }

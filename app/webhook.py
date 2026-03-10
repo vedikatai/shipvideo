@@ -8,7 +8,7 @@ from app.github_comment import comment_on_pr
 from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
 from app.config import load_config
 import time
-from app.pr_analyzer import generate_steps_from_diff_with_fallback
+from app.pr_analyzer import analyze_pr
 
 app = FastAPI()
 
@@ -146,12 +146,13 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 )
                 comment_on_pr(repo_full_name, pr_number, None, error_message)
                 return
-            
-            steps = generate_steps_from_diff_with_fallback(
+
+            flow = analyze_pr(
                 repo_full_name=repo_full_name,
                 pr_number=pr_number,
-                pr_title=pr_title
+                pr_title=pr_title,
             )
+            steps = flow.get("steps") or [{"action": "screenshot"}]
 
             video_url = run_pipeline(
                 pr_number=pr_number,
