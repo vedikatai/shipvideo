@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Header, Request
-import hmac, hashlib, json, os
+import hmac, hashlib, json, os, asyncio
 from pathlib import Path
 from fastapi.responses import StreamingResponse
 from threading import Thread
@@ -147,10 +147,13 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 comment_on_pr(repo_full_name, pr_number, None, error_message)
                 return
 
-            flow = analyze_pr(
-                repo_full_name=repo_full_name,
-                pr_number=pr_number,
-                pr_title=pr_title,
+            flow = asyncio.run(
+                analyze_pr(
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    pr_title=pr_title,
+                    staging_url=preview_url,
+                )
             )
             steps = flow.get("steps") or [{"action": "screenshot"}]
 

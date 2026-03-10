@@ -1,6 +1,6 @@
 """
 Analyzes PR diffs to generate dynamic capture flows (steps + narration)
-using an LLM over the real code diff.
+using an LLM over the real code diff and grounded in the live DOM.
 """
 import os
 from typing import List, Dict, Optional, Any
@@ -10,9 +10,11 @@ import requests
 from groq import Groq
 
 from app.step_normalizer import validate_steps, normalize_steps
+from app.dom_crawler import crawl_dom_data
 
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 MAX_DIFF_CHARS = 8000
+MAX_DOM_CHARS = 2000
 
 def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
     """
@@ -60,7 +62,11 @@ def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
     return result
 
 
-def generate_steps_from_diff(diff_files: List[Dict[str, str]], pr_title: Optional[str]) -> Dict[str, Any]:
+async def generate_steps_from_diff(
+    diff_files: List[Dict[str, str]],
+    pr_title: Optional[str],
+    staging_url: str,
+) -> Dict[str, Any]:
     """
     Phase 1 brain: takes real diff files + PR title and returns
     a flow dict with:
@@ -78,6 +84,21 @@ def generate_steps_from_diff(diff_files: List[Dict[str, str]], pr_title: Optiona
 
     try:
         print("🧠 [route-diff] Calling Groq LLM for step generation...", flush=True)
+
+        # Phase 2: DOM grounding – discover real routes and a snapshot of the home page.
+        dom_data = await crawl_dom_data(staging_url)
+        real_routes = dom_data.get("routes") or ["/"]
+        home_snapshot = dom_data.get("snapshot") or {}
+
+        home_snapshot_json = ""
+        if home_snapshot:
+            home_snapshot_json = json.dumps(home_snapshot, ensure_ascii=False)
+            if len(home_snapshot_json) > MAX_DOM_CHARS:
+                home_snapshot_json = home_snapshot_json[:MAX_DOM_CHARS]
+                print(
+                    f"[dom-ground] Truncated DOM snapshot for LLM to {MAX_DOM_CHARS} characters",
+                    flush=True,
+                )
 
         # Compact view of diffs for the prompt
         diffs_for_prompt = [
@@ -103,6 +124,8 @@ def generate_steps_from_diff(diff_files: List[Dict[str, str]], pr_title: Optiona
             '{\"steps\": [...], \"narration\": \"...\"}.\n'
             "Each step is a simple object like {\"action\": \"screenshot\"} or "
             "{ \"action\": \"goto\", \"url\": \"/billing\" }.\n"
+            "Use only routes present in the provided real_routes list.\n"
+            "Prefer selectors that look like data-testid or aria-label when clicking.\n"
             "Do not include any markdown or explanations."
         )
 
@@ -110,6 +133,8 @@ def generate_steps_from_diff(diff_files: List[Dict[str, str]], pr_title: Optiona
             {
                 "title": pr_title,
                 "diff_files_json": diff_text,
+                "real_routes": real_routes,
+                "home_snapshot_json": home_snapshot_json,
             },
             ensure_ascii=False,
         )
@@ -174,7 +199,12 @@ def generate_steps_from_diff(diff_files: List[Dict[str, str]], pr_title: Optiona
         return {"steps": fallback_steps, "narration": fallback_narration}
 
 
-def analyze_pr(repo_full_name: str, pr_number: int, pr_title: Optional[str]) -> Dict[str, Any]:
+async def analyze_pr(
+    repo_full_name: str,
+    pr_number: int,
+    pr_title: Optional[str],
+    staging_url: str,
+) -> Dict[str, Any]:
     """
     Main Phase 1 entrypoint.
     - Fetches real diff files
@@ -196,7 +226,7 @@ def analyze_pr(repo_full_name: str, pr_number: int, pr_title: Optional[str]) -> 
         for f in diff_files:
             print(f"   - {f['path']} ({f['status']})", flush=True)
 
-        flow = generate_steps_from_diff(diff_files, pr_title)
+        flow = await generate_steps_from_diff(diff_files, pr_title, staging_url)
         steps = flow.get("steps") or [{"action": "screenshot"}]
         narration = flow.get("narration") or "Demo screenshot for this pull request."
 
