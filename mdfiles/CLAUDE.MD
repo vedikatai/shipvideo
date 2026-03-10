@@ -40,7 +40,7 @@ TEMPLATES = {
         {"action": "screenshot"}
     ]
 }
-```
+```'
 
 ### Step 2: Add keyword matching
 ```python
