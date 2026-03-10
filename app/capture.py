@@ -83,6 +83,13 @@ def capture_demo(preview_url: str, steps=None):
             else:
                 print(f"⚠️ Unknown action '{action}', skipping", flush=True)
 
+        # Fallback: if no screenshots were taken for any reason, capture final state once.
+        has_shots = any(APP_DIR.glob("shot*.png"))
+        if not has_shots:
+            fallback_path = APP_DIR / "shot1.png"
+            print("[capture] No screenshots taken, capturing fallback -> shot1.png", flush=True)
+            page.screenshot(path=str(fallback_path))
+
         browser.close()
 
 if __name__ == "__main__":

@@ -181,6 +181,11 @@ async def generate_steps_from_diff(
         data = json.loads(text)
         steps = data.get("steps") or fallback_steps
 
+        # Ensure at least one screenshot action exists
+        if not any(isinstance(s, dict) and s.get("action") == "screenshot" for s in steps):
+            print("[route-diff] No screenshot step in LLM output, adding fallback screenshot", flush=True)
+            steps.append({"action": "screenshot"})
+
         # Validate + normalize before handing off to executor
         validated = validate_steps(steps)
         if not validated:
