@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+from app.execution_engine import safe_click
+
 APP_DIR = Path(__file__).resolve().parent
 
 DEFAULT_STEPS = [
@@ -69,12 +71,9 @@ def capture_demo(preview_url: str, steps=None):
                     print("⚠️ Skipping click step with no selector", flush=True)
                     continue
                 print(f"🖱️ Clicking selector: {selector}", flush=True)
-                try:
-                    page.click(selector)
-                except PlaywrightTimeoutError:
-                    print(f"⚠️ Click timed out for selector: {selector}, continuing", flush=True)
-                except Exception as e:
-                    print(f"⚠️ Click failed for selector {selector}: {type(e).__name__}: {e}", flush=True)
+                ok = safe_click(page, selector)
+                if not ok:
+                    print(f"[execution] safe_click failed for selector: {selector}", flush=True)
             elif action == "goto":
                 target = step.get("url")
                 resolved = _resolve_url(preview_url, target)

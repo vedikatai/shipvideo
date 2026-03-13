@@ -34,21 +34,39 @@ async def _discover_routes(page, staging_url: str) -> List[str]:
         return ["/"]
 
 
-async def _get_accessibility_snapshot(page, url: str) -> Dict[str, Any]:
+MAX_ITEMS = 20
+
+
+def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
+    testid = (meta.get("testid") or "").strip()
+    aria = (meta.get("aria") or "").strip()
+    el_id = (meta.get("id") or "").strip()
+    classes = (meta.get("classes") or "").strip().split()
+    if testid:
+        return f"[data-testid='{testid}']"
+    if aria:
+        return f"[aria-label='{aria}']"
+    if el_id:
+        return f"#{el_id}"
+    if classes:
+        return f"{fallback_tag}.{classes[0]}"
+    return fallback_tag
+
+
+async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
     """
-    Collect a compact snapshot of interactive elements for a given URL
-    using an existing page. Helps the LLM see real labels and roles.
+    Collect structured UI elements: buttons (text + selector), links (text + href),
+    inputs (placeholder/name), and elements with data-testid. Max 20 per category.
     """
     try:
-        print(f"🔍 [dom-ground] Getting accessibility snapshot for {url}", flush=True)
+        print(f"🔍 [dom-ground] Collecting UI elements for {url}", flush=True)
         await page.goto(url, timeout=15000)
         await page.wait_for_load_state("networkidle")
 
-        # Collect raw element metadata in the page context
         buttons = await page.eval_on_selector_all(
             "button, [role='button']",
             """els => els.slice(0, 50).map(e => ({
-                text: e.innerText || "",
+                text: (e.innerText || "").trim().slice(0, 80),
                 testid: e.getAttribute('data-testid') || "",
                 aria: e.getAttribute('aria-label') || "",
                 id: e.id || "",
@@ -58,7 +76,7 @@ async def _get_accessibility_snapshot(page, url: str) -> Dict[str, Any]:
         links = await page.eval_on_selector_all(
             "a[href]",
             """els => els.slice(0, 50).map(e => ({
-                text: e.innerText || "",
+                text: (e.innerText || "").trim().slice(0, 80),
                 href: e.getAttribute('href') || "",
                 testid: e.getAttribute('data-testid') || "",
                 aria: e.getAttribute('aria-label') || "",
@@ -69,76 +87,77 @@ async def _get_accessibility_snapshot(page, url: str) -> Dict[str, Any]:
         inputs = await page.eval_on_selector_all(
             "input, textarea, select",
             """els => els.slice(0, 50).map(e => ({
-                placeholder: e.getAttribute('placeholder') || "",
+                placeholder: (e.getAttribute('placeholder') || "").slice(0, 60),
+                name: (e.getAttribute('name') || "").slice(0, 60),
                 type: e.getAttribute('type') || "",
-                name: e.getAttribute('name') || "",
                 testid: e.getAttribute('data-testid') || "",
                 aria: e.getAttribute('aria-label') || "",
                 id: e.id || "",
                 classes: e.className || ""
             }))""",
         )
+        data_testid_els = await page.eval_on_selector_all(
+            "[data-testid]",
+            """els => els.slice(0, 50).map(e => ({
+                testid: e.getAttribute('data-testid') || "",
+                tag: e.tagName.toLowerCase(),
+                text: (e.innerText || "").trim().slice(0, 60)
+            }))""",
+        )
 
-        def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
-            testid = (meta.get("testid") or "").strip()
-            aria = (meta.get("aria") or "").strip()
-            el_id = (meta.get("id") or "").strip()
-            classes = (meta.get("classes") or "").strip().split()
-
-            if testid:
-                return f"[data-testid='{testid}']"
-            if aria:
-                return f"[aria-label='{aria}']"
-            if el_id:
-                return f"#{el_id}"
-            if classes:
-                return f"{fallback_tag}.{classes[0]}"
-            return fallback_tag
-
-        snapshot: Dict[str, Any] = {
+        out: Dict[str, Any] = {
             "buttons": [],
             "links": [],
             "inputs": [],
         }
 
-        for meta in buttons[:20]:
-            snapshot["buttons"].append(
-                {
-                    "text": meta.get("text", ""),
-                    "selector": _short_selector(meta, "button"),
-                }
-            )
+        for meta in buttons[:MAX_ITEMS]:
+            out["buttons"].append({
+                "text": meta.get("text", ""),
+                "selector": _short_selector(meta, "button"),
+            })
 
-        for meta in links[:20]:
-            snapshot["links"].append(
-                {
-                    "text": meta.get("text", ""),
-                    "href": meta.get("href", ""),
-                }
-            )
+        for meta in links[:MAX_ITEMS]:
+            out["links"].append({
+                "text": meta.get("text", ""),
+                "href": meta.get("href", ""),
+            })
 
-        for meta in inputs[:20]:
-            snapshot["inputs"].append(
-                {
-                    "placeholder": meta.get("placeholder", ""),
-                    "selector": _short_selector(meta, "input"),
-                }
-            )
+        for meta in inputs[:MAX_ITEMS]:
+            out["inputs"].append({
+                "placeholder": meta.get("placeholder", ""),
+                "name": meta.get("name", ""),
+            })
 
-        return snapshot
+        # Dedupe by testid, keep max 20
+        seen = set()
+        data_testids: List[Dict[str, str]] = []
+        for el in data_testid_els[:MAX_ITEMS * 2]:
+            t = (el.get("testid") or "").strip()
+            if t and t not in seen:
+                seen.add(t)
+                data_testids.append({
+                    "testid": t,
+                    "tag": (el.get("tag") or "").lower(),
+                    "text": (el.get("text") or "").strip()[:60],
+                })
+            if len(data_testids) >= MAX_ITEMS:
+                break
+        out["data_testids"] = data_testids
+
+        print(f"✅ [dom-ground] Collected {len(out['buttons'])} buttons, {len(out['links'])} links, {len(out['inputs'])} inputs", flush=True)
+        return out
     except Exception as e:
-        print(f"⚠️ [dom-ground] Snapshot failed for {url}: {type(e).__name__}: {e}", flush=True)
-        return {}
+        print(f"⚠️ [dom-ground] UI element collection failed for {url}: {type(e).__name__}: {e}", flush=True)
+        return {"buttons": [], "links": [], "inputs": [], "data_testids": []}
 
 
 async def crawl_dom_data(staging_url: str) -> Dict[str, Any]:
     """
-    Launch Playwright once to collect:
-      - routes: discovered internal routes
-      - snapshot: accessibility tree for the home page
+    Launch Playwright once; return structured UI data:
+      routes (internal <a href>), buttons (text + selector), links (text + href),
+      inputs (placeholder/name), data_testids. Max 20 per category.
     """
-    from urllib.parse import urljoin
-
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -146,18 +165,24 @@ async def crawl_dom_data(staging_url: str) -> Dict[str, Any]:
 
             routes = await _discover_routes(page, staging_url)
             home_url = staging_url.rstrip("/") + "/"
-            snapshot = await _get_accessibility_snapshot(page, home_url)
+            ui = await _collect_ui_elements(page, home_url)
 
             await browser.close()
 
             return {
                 "routes": routes or ["/"],
-                "snapshot": snapshot or {},
+                "buttons": ui.get("buttons") or [],
+                "links": ui.get("links") or [],
+                "inputs": ui.get("inputs") or [],
+                "data_testids": ui.get("data_testids") or [],
             }
     except Exception as e:
         print(f"⚠️ [dom-ground] crawl_dom_data failed: {type(e).__name__}: {e}", flush=True)
         return {
             "routes": ["/"],
-            "snapshot": {},
+            "buttons": [],
+            "links": [],
+            "inputs": [],
+            "data_testids": [],
         }
 

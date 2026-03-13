@@ -85,20 +85,13 @@ async def generate_steps_from_diff(
     try:
         print("🧠 [route-diff] Calling Groq LLM for step generation...", flush=True)
 
-        # Phase 2: DOM grounding – discover real routes and a snapshot of the home page.
+        # Phase 2: DOM grounding – real routes and structured UI elements.
         dom_data = await crawl_dom_data(staging_url)
         real_routes = dom_data.get("routes") or ["/"]
-        home_snapshot = dom_data.get("snapshot") or {}
-
-        home_snapshot_json = ""
-        if home_snapshot:
-            home_snapshot_json = json.dumps(home_snapshot, ensure_ascii=False)
-            if len(home_snapshot_json) > MAX_DOM_CHARS:
-                home_snapshot_json = home_snapshot_json[:MAX_DOM_CHARS]
-                print(
-                    f"[dom-ground] Truncated DOM snapshot for LLM to {MAX_DOM_CHARS} characters",
-                    flush=True,
-                )
+        real_buttons = dom_data.get("buttons") or []
+        real_links = dom_data.get("links") or []
+        real_inputs = dom_data.get("inputs") or []
+        real_data_testids = dom_data.get("data_testids") or []
 
         # Compact view of diffs for the prompt
         diffs_for_prompt = [
@@ -123,18 +116,22 @@ async def generate_steps_from_diff(
             "Return STRICT JSON ONLY with the shape:\n"
             '{\"steps\": [...], \"narration\": \"...\"}.\n'
             "Each step is a simple object like {\"action\": \"screenshot\"} or "
-            "{ \"action\": \"goto\", \"url\": \"/billing\" }.\n"
-            "Use only routes present in the provided real_routes list.\n"
-            "Prefer selectors that look like data-testid or aria-label when clicking.\n"
+            "{ \"action\": \"goto\", \"url\": \"/billing\" } or "
+            "{ \"action\": \"click\", \"selector\": \"[data-testid='x']\" } or { \"action\": \"click\", \"text\": \"Button label\" }.\n"
+            "Use only routes from real_routes. For clicks, use only selectors or button/link text from real_buttons and real_links.\n"
+            "Prefer [data-testid='...'] when listed in real_buttons or data_testids; otherwise use \"text\": \"exact visible text\".\n"
             "Do not include any markdown or explanations."
         )
 
         user_msg = json.dumps(
             {
                 "title": pr_title,
-                "diff_files_json": diff_text,
+                "diff_files": diff_text,
                 "real_routes": real_routes,
-                "home_snapshot_json": home_snapshot_json,
+                "real_buttons": real_buttons,
+                "real_links": real_links,
+                "real_inputs": real_inputs,
+                "data_testids": real_data_testids,
             },
             ensure_ascii=False,
         )
