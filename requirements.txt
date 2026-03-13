@@ -13,3 +13,4 @@ uvicorn[standard]
 
 # Browser automation (capture)
 playwright
+openai

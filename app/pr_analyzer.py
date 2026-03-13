@@ -1,18 +1,22 @@
 """
 Analyzes PR diffs to generate dynamic capture flows (steps + narration)
-using an LLM over the real code diff and grounded in the live DOM.
+using Azure OpenAI over the real code diff and grounded in the live DOM.
 """
 import os
 from typing import List, Dict, Optional, Any
 
 import json
 import requests
-from groq import Groq
 
 from app.step_normalizer import validate_steps, normalize_steps
 from app.dom_crawler import crawl_dom_data
 
-groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+try:
+    # Use the generic OpenAI client against the Azure endpoint,
+    # following the portal's code sample (base_url + deployment_name).
+    from openai import OpenAI  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    OpenAI = None  # type: ignore
 MAX_DIFF_CHARS = 8000
 MAX_DOM_CHARS = 2000
 
@@ -73,7 +77,7 @@ async def generate_steps_from_diff(
       - steps: list of capture steps for capture_demo()
       - narration: string script describing the demo
 
-    Uses Groq LLM and falls back deterministically on failure.
+    Uses Azure OpenAI (via OpenAI client) and falls back deterministically on failure.
     """
     fallback_steps: List[Dict[str, Any]] = [{"action": "screenshot"}]
     fallback_narration = (
@@ -83,7 +87,7 @@ async def generate_steps_from_diff(
     )
 
     try:
-        print("🧠 [route-diff] Calling Groq LLM for step generation...", flush=True)
+        print("🧠 [route-diff] Calling Azure OpenAI for step generation...", flush=True)
 
         # Phase 2: DOM grounding – real routes and structured UI elements.
         dom_data = await crawl_dom_data(staging_url)
@@ -141,18 +145,29 @@ async def generate_steps_from_diff(
             {"role": "user", "content": user_msg},
         ]
 
-        try:
-            completion = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=messages,
-                temperature=0.2,
-            )
-        except Exception:
-            completion = groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=messages,
-                temperature=0.2,
-            )
+        # Use Azure OpenAI (via OpenAI client). If misconfigured, fall back to deterministic steps.
+        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+        azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        if not (OpenAI and azure_endpoint and azure_key and azure_deployment):
+            raise RuntimeError("Azure OpenAI is not configured correctly")
+
+        print("[route-diff] Using Azure OpenAI backend (OpenAI client)", flush=True)
+
+        # Portal sample uses base_url ending with /openai/v1/
+        base_url = azure_endpoint
+        if not base_url.rstrip("/").endswith("openai/v1"):
+            base_url = base_url.rstrip("/") + "/openai/v1/"
+
+        client = OpenAI(
+            base_url=base_url,
+            api_key=azure_key,
+        )
+        completion = client.chat.completions.create(
+            model=azure_deployment,
+            messages=messages,
+            temperature=0.2,
+        )
 
         content = completion.choices[0].message.content or ""
 
@@ -193,11 +208,11 @@ async def generate_steps_from_diff(
 
         narration = data.get("narration") or fallback_narration
         print(f"[route-diff] steps: {normalized}", flush=True)
-        print(f"✅ [route-diff] Groq LLM returned {len(normalized)} steps", flush=True)
+        print(f"✅ [route-diff] Azure OpenAI returned {len(normalized)} steps", flush=True)
         return {"steps": normalized, "narration": narration}
 
     except Exception as e:
-        print(f"❌ [route-diff] Groq step generation failed: {type(e).__name__}: {e}", flush=True)
+        print(f"❌ [route-diff] Azure step generation failed: {type(e).__name__}: {e}", flush=True)
         return {"steps": fallback_steps, "narration": fallback_narration}
 
 
