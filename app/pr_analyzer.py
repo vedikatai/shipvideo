@@ -96,8 +96,8 @@ async def generate_steps_from_diff(
         print("🧠 [route-diff] Calling Azure OpenAI for step generation...", flush=True)
 
         if not check_budget():
-            print("[route-diff] Under budget guard; using fallback steps", flush=True)
-            return {"steps": fallback_steps, "narration": fallback_narration}
+            print("[route-diff] Budget limit reached; using fallback steps (no LLM call)", flush=True)
+            return {"steps": fallback_steps, "narration": fallback_narration, "budget_exceeded": True}
 
         # Phase 2: DOM grounding – real routes and structured UI elements.
         dom_data = await crawl_dom_data(staging_url)
@@ -234,7 +234,7 @@ async def generate_steps_from_diff(
 
     except Exception as e:
         print(f"❌ [route-diff] Azure step generation failed: {type(e).__name__}: {e}", flush=True)
-        return {"steps": fallback_steps, "narration": fallback_narration}
+        return {"steps": fallback_steps, "narration": fallback_narration, "budget_exceeded": False}
 
 
 async def analyze_pr(
@@ -267,9 +267,10 @@ async def analyze_pr(
         flow = await generate_steps_from_diff(diff_files, pr_title, staging_url)
         steps = flow.get("steps") or [{"action": "screenshot"}]
         narration = flow.get("narration") or "Demo screenshot for this pull request."
+        budget_exceeded = flow.get("budget_exceeded", False)
 
         print(f"✅ [route-diff] Generated {len(steps)} steps from diff", flush=True)
-        return {"steps": steps, "narration": narration}
+        return {"steps": steps, "narration": narration, "budget_exceeded": budget_exceeded}
 
     except Exception as e:
         print(f"❌ [route-diff] Error analyzing PR diff: {type(e).__name__}: {e}", flush=True)

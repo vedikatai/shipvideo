@@ -1,7 +1,7 @@
 from github import Github
 import os
 
-def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, error_message: str = None):
+def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, error_message: str = None, extra_note: str = None):
     """
     Posts a comment on a PR with the video URL or error message.
     
@@ -10,6 +10,7 @@ def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, er
         pr_number: PR number
         video_url: Public URL of the uploaded video (optional if error_message is provided)
         error_message: Error message to post (optional if video_url is provided)
+        extra_note: Optional line appended to the comment (e.g. budget notification)
     """
     try:
         token = os.getenv("GITHUB_TOKEN")
@@ -21,6 +22,8 @@ def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, er
 
         if video_url:
             comment_text = f"🎬 **Auto-generated demo video for PR #{pr_number}**\n\n{video_url}"
+            if extra_note:
+                comment_text += f"\n\n---\n{extra_note}"
         elif error_message:
             comment_text = error_message
         else:

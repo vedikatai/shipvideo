@@ -9,7 +9,7 @@ from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
 from app.config import load_config
 import time
 from app.pr_analyzer import analyze_pr
-from app.llm_guards import check_already_ran, record_run
+from app.llm_guards import check_already_ran, record_run, get_budget_status
 
 app = FastAPI()
 
@@ -70,6 +70,15 @@ def get_video(request: Request):
         "Content-Type": "video/mp4",
     }
     return StreamingResponse(iterfile(VIDEO_PATH, start, length), status_code=206, headers=headers)
+
+# -------------------------
+# Budget / spend (Azure or local)
+# -------------------------
+@app.get("/budget-status")
+def budget_status():
+    """Return current spend and limit (Azure Cost Management or local). For monitoring."""
+    return get_budget_status()
+
 
 # -------------------------
 # GitHub webhook
@@ -163,6 +172,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 )
             )
             steps = flow.get("steps") or [{"action": "screenshot"}]
+            budget_exceeded = flow.get("budget_exceeded", False)
 
             video_url = run_pipeline(
                 pr_number=pr_number,
@@ -170,7 +180,10 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 steps=steps,
             )
             print("💬 Posting comment to PR", flush=True)
-            comment_on_pr(repo_full_name, pr_number, video_url)
+            extra_note = None
+            if budget_exceeded:
+                extra_note = "ℹ️ **Monthly budget limit reached.** This demo used fallback steps (no LLM)."
+            comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
             print("✅ Background job completed successfully", flush=True)
         except Exception as e:
             print(f"❌ Background job failed: {type(e).__name__}: {e}", flush=True)
