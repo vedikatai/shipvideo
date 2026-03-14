@@ -40,10 +40,10 @@ def main():
     print()
     
     if args.check_only:
-        print("✅ Check-only mode - no cleanup performed")
+        print("[cleanup] check-only mode no cleanup performed")
         return
-    
-    print(f"🧹 Cleaning up videos...")
+
+    print("[cleanup] cleaning up videos")
     print(f"   Keeping: {args.max_videos} most recent videos")
     print(f"   Deleting: Videos older than {args.max_age_days} days")
     print()
@@ -53,7 +53,7 @@ def main():
     # Check usage again
     new_count, new_size = check_storage_usage()
     print()
-    print(f"📊 After Cleanup:")
+    print("[cleanup] after cleanup:")
     print(f"   Videos: {new_count} (removed {video_count - new_count})")
     print(f"   Storage: {new_size:.1f}MB (freed {total_size_mb - new_size:.1f}MB)")
 

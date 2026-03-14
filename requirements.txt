@@ -14,3 +14,7 @@ uvicorn[standard]
 # Browser automation (capture)
 playwright
 openai
+
+# Observability (MVP: tracing with ConsoleSpanExporter only)
+opentelemetry-api
+opentelemetry-sdk

@@ -8,7 +8,7 @@ async def _discover_routes(page, staging_url: str) -> List[str]:
     Discover internal routes from a live staging/preview URL using an existing page.
     """
     try:
-        print(f"🔍 [dom-ground] Discovering routes from {staging_url}", flush=True)
+        print(f"[dom] discovering routes url={staging_url}", flush=True)
         await page.goto(staging_url, timeout=15000)
         await page.wait_for_load_state("networkidle")
 
@@ -26,11 +26,11 @@ async def _discover_routes(page, staging_url: str) -> List[str]:
         )
         if not routes:
             routes = ["/"]
-        print(f"✅ [dom-ground] Discovered routes: {routes}", flush=True)
+        print(f"[dom] routes_found={len(routes)}", flush=True)
         return routes
 
     except Exception as e:
-        print(f"⚠️ [dom-ground] Route discovery failed: {type(e).__name__}: {e}", flush=True)
+        print(f"[dom] route discovery failed: {type(e).__name__}: {e}", flush=True)
         return ["/"]
 
 
@@ -59,7 +59,7 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
     inputs (placeholder/name), and elements with data-testid. Max 20 per category.
     """
     try:
-        print(f"🔍 [dom-ground] Collecting UI elements for {url}", flush=True)
+        print(f"[dom] collecting UI elements url={url}", flush=True)
         await page.goto(url, timeout=15000)
         await page.wait_for_load_state("networkidle")
 
@@ -145,10 +145,10 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
                 break
         out["data_testids"] = data_testids
 
-        print(f"✅ [dom-ground] Collected {len(out['buttons'])} buttons, {len(out['links'])} links, {len(out['inputs'])} inputs", flush=True)
+        print(f"[dom] buttons={len(out['buttons'])} links={len(out['links'])} inputs={len(out['inputs'])}", flush=True)
         return out
     except Exception as e:
-        print(f"⚠️ [dom-ground] UI element collection failed for {url}: {type(e).__name__}: {e}", flush=True)
+        print(f"[dom] UI collection failed url={url}: {type(e).__name__}: {e}", flush=True)
         return {"buttons": [], "links": [], "inputs": [], "data_testids": []}
 
 
@@ -177,7 +177,7 @@ async def crawl_dom_data(staging_url: str) -> Dict[str, Any]:
                 "data_testids": ui.get("data_testids") or [],
             }
     except Exception as e:
-        print(f"⚠️ [dom-ground] crawl_dom_data failed: {type(e).__name__}: {e}", flush=True)
+        print(f"[dom] crawl failed: {type(e).__name__}: {e}", flush=True)
         return {
             "routes": ["/"],
             "buttons": [],

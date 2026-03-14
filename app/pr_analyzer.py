@@ -14,8 +14,10 @@ from app.llm_guards import (
     get_max_tokens,
     check_budget,
     record_spend,
+    estimate_run_cost,
     should_skip_llm_for_size,
 )
+from observability import pipeline_step
 
 try:
     # Use the generic OpenAI client against the Azure endpoint,
@@ -26,6 +28,7 @@ except Exception:  # pragma: no cover - optional dependency
 MAX_DIFF_CHARS = 8000
 MAX_DOM_CHARS = 2000
 
+@pipeline_step("route_diff_fetch")
 def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
     """
     Fetches changed files and their diffs for a PR using the GitHub REST API.
@@ -64,17 +67,16 @@ def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
                     "patch": patch,
                 }
             )
-            print(f"   [route-diff] file: {f['filename']} ({f['status']})", flush=True)
-
         if len(files) < per_page:
             break
         page += 1
     if page > max_pages:
-        print(f"[route-diff] Reached max_pages ({max_pages}), stopping pagination", flush=True)
-    print(f"[route-diff] fetched {len(result)} changed files", flush=True)
+        print(f"[route-diff] max_pages={max_pages} stopping pagination", flush=True)
+    print(f"[route-diff] files_changed={len(result)}", flush=True)
     return result
 
 
+@pipeline_step("llm_analysis")
 async def generate_steps_from_diff(
     diff_files: List[Dict[str, str]],
     pr_title: Optional[str],
@@ -96,11 +98,11 @@ async def generate_steps_from_diff(
     )
 
     try:
-        print("🧠 [route-diff] Calling Azure OpenAI for step generation...", flush=True)
+        print("[llm] generating steps from diff", flush=True)
 
         if not check_budget():
             print("[route-diff] Budget limit reached; using fallback steps (no LLM call)", flush=True)
-            return {"steps": fallback_steps, "narration": fallback_narration, "budget_exceeded": True}
+            return {"steps": fallback_steps, "narration": fallback_narration, "budget_exceeded": True, "llm_cost_usd": 0.0}
 
         # Phase 2: DOM grounding – real routes and structured UI elements.
         dom_data = await crawl_dom_data(staging_url)
@@ -129,7 +131,7 @@ async def generate_steps_from_diff(
             )
 
         if should_skip_llm_for_size(len(diff_text)):
-            return {"steps": fallback_steps, "narration": fallback_narration}
+            return {"steps": fallback_steps, "narration": fallback_narration, "llm_cost_usd": 0.0}
 
         system_msg = (
             "You are a tool that generates a short UI demo flow for a pull request.\n"
@@ -168,7 +170,7 @@ async def generate_steps_from_diff(
         if not (OpenAI and azure_endpoint and azure_key and azure_deployment):
             raise RuntimeError("Azure OpenAI is not configured correctly")
 
-        print("[route-diff] Using Azure OpenAI backend (OpenAI client)", flush=True)
+        print("[llm] using Azure OpenAI backend", flush=True)
 
         # Portal sample uses base_url ending with /openai/v1/
         base_url = azure_endpoint
@@ -187,11 +189,12 @@ async def generate_steps_from_diff(
         )
 
         usage = getattr(completion, "usage", None)
+        llm_cost_usd = 0.0
         if usage is not None:
-            record_spend(
-                getattr(usage, "prompt_tokens", 0) or 0,
-                getattr(usage, "completion_tokens", 0) or 0,
-            )
+            pt = getattr(usage, "prompt_tokens", 0) or 0
+            ct = getattr(usage, "completion_tokens", 0) or 0
+            record_spend(pt, ct)
+            llm_cost_usd = round(estimate_run_cost(pt, ct), 4)
 
         content = completion.choices[0].message.content or ""
 
@@ -219,7 +222,7 @@ async def generate_steps_from_diff(
 
         # Ensure at least one screenshot action exists
         if not any(isinstance(s, dict) and s.get("action") == "screenshot" for s in steps):
-            print("[route-diff] No screenshot step in LLM output, adding fallback screenshot", flush=True)
+            print("[llm] adding fallback screenshot step", flush=True)
             steps.append({"action": "screenshot"})
 
         # Validate + normalize before handing off to executor
@@ -231,15 +234,15 @@ async def generate_steps_from_diff(
             normalized = fallback_steps
 
         narration = data.get("narration") or fallback_narration
-        print(f"[route-diff] steps: {normalized}", flush=True)
-        print(f"✅ [route-diff] Azure OpenAI returned {len(normalized)} steps", flush=True)
-        return {"steps": normalized, "narration": narration}
+        print(f"[llm] steps_generated={len(normalized)}", flush=True)
+        return {"steps": normalized, "narration": narration, "llm_cost_usd": llm_cost_usd}
 
     except Exception as e:
-        print(f"❌ [route-diff] Azure step generation failed: {type(e).__name__}: {e}", flush=True)
-        return {"steps": fallback_steps, "narration": fallback_narration, "budget_exceeded": False}
+        print(f"[llm] step generation failed: {type(e).__name__}: {e}", flush=True)
+        return {"steps": fallback_steps, "narration": fallback_narration, "budget_exceeded": False, "llm_cost_usd": 0.0}
 
 
+@pipeline_step("route_diff_analysis")
 async def analyze_pr(
     repo_full_name: str,
     pr_number: int,
@@ -253,30 +256,29 @@ async def analyze_pr(
     - Provides deterministic fallback on failure
     """
     try:
-        print(f"🔍 [route-diff] Fetching PR diff for {repo_full_name}#{pr_number}...", flush=True)
+        print(f"[route-diff] fetching PR diff repo={repo_full_name} pr={pr_number}", flush=True)
         diff_files = fetch_pr_diff(repo_full_name, pr_number)
 
         if not diff_files:
-            print("⚠️ [route-diff] No diff files, using default single screenshot", flush=True)
+            print("[route-diff] no diff files using default screenshot", flush=True)
             return {
                 "steps": [{"action": "screenshot"}],
                 "narration": "Demo screenshot for this pull request.",
+                "llm_cost_usd": 0.0,
             }
 
-        print(f"📁 [route-diff] Found {len(diff_files)} diff file(s)", flush=True)
-        for f in diff_files:
-            print(f"   - {f['path']} ({f['status']})", flush=True)
+        print(f"[route-diff] files_changed={len(diff_files)}", flush=True)
 
         flow = await generate_steps_from_diff(diff_files, pr_title, staging_url)
         steps = flow.get("steps") or [{"action": "screenshot"}]
         narration = flow.get("narration") or "Demo screenshot for this pull request."
         budget_exceeded = flow.get("budget_exceeded", False)
+        llm_cost_usd = flow.get("llm_cost_usd", 0.0)
 
-        print(f"✅ [route-diff] Generated {len(steps)} steps from diff", flush=True)
-        return {"steps": steps, "narration": narration, "budget_exceeded": budget_exceeded}
+        return {"steps": steps, "narration": narration, "budget_exceeded": budget_exceeded, "llm_cost_usd": llm_cost_usd}
 
     except Exception as e:
-        print(f"❌ [route-diff] Error analyzing PR diff: {type(e).__name__}: {e}", flush=True)
+        print(f"[route-diff] analyze failed: {type(e).__name__}: {e}", flush=True)
         import traceback
 
         traceback.print_exc()
@@ -284,4 +286,5 @@ async def analyze_pr(
         return {
             "steps": [{"action": "screenshot"}],
             "narration": "Demo screenshot for this pull request (fallback).",
+            "llm_cost_usd": 0.0,
         }

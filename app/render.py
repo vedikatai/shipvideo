@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 import glob
+from observability import pipeline_step
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -8,6 +9,7 @@ APP_DIR = Path(__file__).resolve().parent
 FFMPEG_LOGLEVEL = "-loglevel", "error"
 
 
+@pipeline_step("render")
 def render_video():
     """Create a video from screenshots. Dynamically finds all shot*.png files in order."""
     output_path = APP_DIR / "out.mp4"
@@ -18,9 +20,7 @@ def render_video():
     if not shot_files:
         raise FileNotFoundError("No screenshot files found (shot*.png)")
 
-    print(f"🎬 Found {len(shot_files)} screenshots to render", flush=True)
-    for i, shot in enumerate(shot_files, 1):
-        print(f"   {i}. {Path(shot).name}", flush=True)
+    print(f"[render] screenshots={len(shot_files)}", flush=True)
 
     # Build FFmpeg command dynamically based on number of screenshots
     if len(shot_files) == 1:

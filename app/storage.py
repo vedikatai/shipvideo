@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from botocore.config import Config
 from typing import List, Tuple
+from observability import pipeline_step
 
 
 def get_r2_client():
@@ -49,7 +50,7 @@ def list_videos(s3_client, bucket_name: str, prefix: str = "videos/") -> List[Tu
                         last_modified = obj["LastModified"]
                         videos.append((key, last_modified))
     except Exception as e:
-        print(f"⚠️ Warning: Could not list videos: {e}", flush=True)
+        print(f"[upload] list videos failed: {e}", flush=True)
     
     return sorted(videos, key=lambda x: x[1], reverse=True)  # Newest first
 
@@ -91,9 +92,9 @@ def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
                     try:
                         s3_client.delete_object(Bucket=bucket_name, Key=key)
                         deleted_count += 1
-                        print(f"🗑️  Deleted old video: {key}", flush=True)
+                        print(f"[upload] cleanup deleted key={key}", flush=True)
                     except Exception as e:
-                        print(f"⚠️  Failed to delete {key}: {e}", flush=True)
+                        print(f"[upload] cleanup delete failed key={key}: {e}", flush=True)
                 else:
                     kept_count += 1
             else:
@@ -101,17 +102,17 @@ def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
                 try:
                     s3_client.delete_object(Bucket=bucket_name, Key=key)
                     deleted_count += 1
-                    print(f"🗑️  Deleted excess video: {key}", flush=True)
+                    print(f"[upload] cleanup deleted excess key={key}", flush=True)
                 except Exception as e:
-                    print(f"⚠️  Failed to delete {key}: {e}", flush=True)
-        
+                    print(f"[upload] cleanup delete failed key={key}: {e}", flush=True)
+
         if deleted_count > 0:
-            print(f"🧹 Cleanup: Deleted {deleted_count} videos, kept {kept_count}", flush=True)
+            print(f"[upload] cleanup deleted={deleted_count} kept={kept_count}", flush=True)
         else:
-            print(f"✅ Cleanup: All {kept_count} videos within limits", flush=True)
-            
+            print(f"[upload] cleanup kept={kept_count} within limits", flush=True)
+
     except Exception as e:
-        print(f"⚠️  Cleanup failed: {e}", flush=True)
+        print(f"[upload] cleanup failed: {e}", flush=True)
 
 
 def check_storage_usage() -> Tuple[int, float]:
@@ -133,10 +134,11 @@ def check_storage_usage() -> Tuple[int, float]:
         
         return len(videos), total_size
     except Exception as e:
-        print(f"⚠️  Could not check storage usage: {e}", flush=True)
+        print(f"[upload] check storage usage failed: {e}", flush=True)
         return 0, 0.0
 
 
+@pipeline_step("upload")
 def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = None) -> str:
     """
     Upload video to R2 with free tier safeguards.
@@ -152,19 +154,16 @@ def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = N
     # Check file size (warn if > 50MB)
     file_size_mb = get_file_size_mb(local_path)
     if file_size_mb > 50:
-        print(f"⚠️  WARNING: Video is {file_size_mb:.1f}MB (large file!)", flush=True)
-    
-    # Check current usage
+        print(f"[upload] warning large file size_mb={file_size_mb:.1f}", flush=True)
+
     video_count, total_size_mb = check_storage_usage()
-    
-    # Free tier limits: 10 GB storage
     FREE_TIER_STORAGE_GB = 10
     FREE_TIER_STORAGE_MB = FREE_TIER_STORAGE_GB * 1024
-    
-    if total_size_mb + file_size_mb > FREE_TIER_STORAGE_MB * 0.5:  # Warn at 50%
-        print(f"⚠️  WARNING: Storage usage high ({total_size_mb:.1f}MB / {FREE_TIER_STORAGE_MB}MB)", flush=True)
+
+    if total_size_mb + file_size_mb > FREE_TIER_STORAGE_MB * 0.5:
+        print(f"[upload] warning storage high size_mb={total_size_mb:.1f}", flush=True)
         if auto_cleanup:
-            print("🧹 Running automatic cleanup...", flush=True)
+            print("[upload] running automatic cleanup", flush=True)
             cleanup_old_videos(max_videos=30, max_age_days=3)  # More aggressive cleanup
     
     public_base = os.getenv("R2_PUBLIC_BASE_URL")
@@ -179,7 +178,7 @@ def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = N
     else:
         object_key = f"videos/{timestamp}_{local_path.name}"
 
-    print(f"📤 Uploading {object_key} ({file_size_mb:.1f}MB)", flush=True)
+    print(f"[upload] uploading key={object_key} size_mb={file_size_mb:.1f}", flush=True)
 
     s3_client.upload_file(
         str(local_path),
@@ -192,10 +191,7 @@ def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = N
     )
 
     public_url = f"{public_base}/{object_key}"
-    print(f"🌐 Public URL: {public_url}", flush=True)
-    
-    # Show updated usage
     new_count, new_size = check_storage_usage()
-    print(f"📊 Storage: {new_count} videos, {new_size:.1f}MB / {FREE_TIER_STORAGE_MB}MB", flush=True)
+    print(f"[upload] public_url={public_url} videos={new_count} size_mb={new_size:.1f}", flush=True)
 
     return public_url

@@ -21,7 +21,7 @@ def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, er
         pr = repo.get_pull(pr_number)
 
         if video_url:
-            comment_text = f"🎬 **Auto-generated demo video for PR #{pr_number}**\n\n{video_url}"
+            comment_text = f"**Auto-generated demo video for PR #{pr_number}**\n\n{video_url}"
             if extra_note:
                 comment_text += f"\n\n---\n{extra_note}"
         elif error_message:
@@ -31,10 +31,10 @@ def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, er
 
         pr.create_issue_comment(comment_text)
         if video_url:
-            print(f"💬 Comment posted to PR with video URL: {video_url}")
+            print(f"[webhook] comment posted video_url={video_url[:60]}...", flush=True)
         else:
-            print(f"💬 Comment posted to PR with error message")
+            print("[webhook] comment posted error_message", flush=True)
 
     except Exception as e:
-        print("❌ Failed to post comment:", e)
+        print(f"[webhook] comment failed: {e}", flush=True)
         raise e

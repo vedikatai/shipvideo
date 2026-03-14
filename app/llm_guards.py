@@ -47,6 +47,11 @@ SPEND_FILE = DATA_DIR / "llm_spend.json"
 DEDUPE_FILE = DATA_DIR / "llm_dedup.json"
 MAX_DEDUPE_ENTRIES = 500
 
+# Toggle to allow/bypass PR+commit dedupe.
+# When LLM_DEDUPE_ENABLED is set to "false", "0", or "no" (case-insensitive),
+# we will always treat runs as new (useful for manual re-triggers of the same PR+commit).
+DEDUPE_ENABLED = os.getenv("LLM_DEDUPE_ENABLED", "true").lower() not in {"false", "0", "no"}
+
 _lock = threading.Lock()
 
 
@@ -263,6 +268,11 @@ def check_budget() -> bool:
             return True
 
 
+def estimate_run_cost(prompt_tokens: int, completion_tokens: int) -> float:
+    """Estimated cost in USD for one LLM call (for run summary)."""
+    return (prompt_tokens / 1000.0) * PRICE_PER_1K_INPUT_USD + (completion_tokens / 1000.0) * PRICE_PER_1K_OUTPUT_USD
+
+
 def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
     """
     Record estimated cost from a single LLM call.
@@ -270,7 +280,7 @@ def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
     expenditure, remaining balance, and budget come from Azure only.
     When Azure is not configured, we update the local file for check_budget() / get_budget_status().
     """
-    estimated = (prompt_tokens / 1000.0) * PRICE_PER_1K_INPUT_USD + (completion_tokens / 1000.0) * PRICE_PER_1K_OUTPUT_USD
+    estimated = estimate_run_cost(prompt_tokens, completion_tokens)
     if _azure_configured():
         print(f"[llm-guards] LLM cost ~${estimated:.4f} (spend/balance from Azure, not recording locally)", flush=True)
         return
@@ -291,6 +301,9 @@ def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
 
 def check_already_ran(repo: str, pr_number: int, commit_sha: str) -> bool:
     """True if we already ran for this repo + PR + commit (e.g. redelivery)."""
+    if not DEDUPE_ENABLED:
+        print("[llm-guards] Dedupe disabled via LLM_DEDUPE_ENABLED, always running", flush=True)
+        return False
     if not commit_sha:
         return False
     key = f"{repo}#{pr_number}#{commit_sha}"
