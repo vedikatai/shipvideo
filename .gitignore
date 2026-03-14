@@ -14,6 +14,7 @@ __pycache__/
 venv/
 env/
 app/*.png
+app/data/
 
 
 shot1.png

@@ -9,6 +9,7 @@ from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
 from app.config import load_config
 import time
 from app.pr_analyzer import analyze_pr
+from app.llm_guards import check_already_ran, record_run
 
 app = FastAPI()
 
@@ -114,11 +115,17 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
 
     repo_full_name = repo  # Already extracted above
     pr_branch = (pr.get("head") or {}).get("ref") if "pull_request" in event else None
+    commit_sha = ((pr.get("head") or {}).get("sha") or "") if "pull_request" in event else ""
 
     def background_job():
         try:
             print("🚀 Background job started", flush=True)
-            
+
+            if check_already_ran(repo_full_name, pr_number, commit_sha):
+                print("[llm-guards] Skipping duplicate run for this PR+commit", flush=True)
+                return
+            record_run(repo_full_name, pr_number, commit_sha)
+
             # Wait for deployment to finish (simple fixed delay)
             delay = load_config().get("deployment_delay_seconds", 0)
             if delay > 0:

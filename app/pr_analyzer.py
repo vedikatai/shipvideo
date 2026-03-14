@@ -10,6 +10,12 @@ import requests
 
 from app.step_normalizer import validate_steps, normalize_steps
 from app.dom_crawler import crawl_dom_data
+from app.llm_guards import (
+    get_max_tokens,
+    check_budget,
+    record_spend,
+    should_skip_llm_for_size,
+)
 
 try:
     # Use the generic OpenAI client against the Azure endpoint,
@@ -89,6 +95,10 @@ async def generate_steps_from_diff(
     try:
         print("🧠 [route-diff] Calling Azure OpenAI for step generation...", flush=True)
 
+        if not check_budget():
+            print("[route-diff] Under budget guard; using fallback steps", flush=True)
+            return {"steps": fallback_steps, "narration": fallback_narration}
+
         # Phase 2: DOM grounding – real routes and structured UI elements.
         dom_data = await crawl_dom_data(staging_url)
         real_routes = dom_data.get("routes") or ["/"]
@@ -114,6 +124,9 @@ async def generate_steps_from_diff(
                 f"[route-diff] Truncated diff payload for LLM to {MAX_DIFF_CHARS} characters",
                 flush=True,
             )
+
+        if should_skip_llm_for_size(len(diff_text)):
+            return {"steps": fallback_steps, "narration": fallback_narration}
 
         system_msg = (
             "You are a tool that generates a short UI demo flow for a pull request.\n"
@@ -167,7 +180,15 @@ async def generate_steps_from_diff(
             model=azure_deployment,
             messages=messages,
             temperature=0.2,
+            max_tokens=get_max_tokens(),
         )
+
+        usage = getattr(completion, "usage", None)
+        if usage is not None:
+            record_spend(
+                getattr(usage, "prompt_tokens", 0) or 0,
+                getattr(usage, "completion_tokens", 0) or 0,
+            )
 
         content = completion.choices[0].message.content or ""
 
