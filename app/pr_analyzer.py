@@ -45,7 +45,8 @@ def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
 
     page = 1
     per_page = 100
-    while True:
+    max_pages = 50  # Safety cap: avoid unbounded loop if API misbehaves (50 * 100 = 5000 files)
+    while page <= max_pages:
         resp = requests.get(url, headers=headers, params={"page": page, "per_page": per_page})
         files = resp.json()
         if not files:
@@ -68,6 +69,8 @@ def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
         if len(files) < per_page:
             break
         page += 1
+    if page > max_pages:
+        print(f"[route-diff] Reached max_pages ({max_pages}), stopping pagination", flush=True)
     print(f"[route-diff] fetched {len(result)} changed files", flush=True)
     return result
 
