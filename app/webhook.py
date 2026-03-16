@@ -183,6 +183,17 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 run_llm_cost_usd = float(flow.get("llm_cost_usd", 0.0) or 0.0)
                 span.set_attribute("steps_generated", len(steps))
 
+                # Pretty-print the generated steps in purple for easy scanning in logs.
+                PURPLE = "\033[35m"
+                RESET = "\033[0m"
+                try:
+                    print(f"{PURPLE}Generated steps:{RESET}", flush=True)
+                    for idx, step in enumerate(steps, start=1):
+                        print(f"{PURPLE}  {idx}. {step}{RESET}", flush=True)
+                except Exception:
+                    # Never let logging crash the pipeline; ignore any print issues.
+                    pass
+
                 print("\n[webhook] === VIDEO PIPELINE ===", flush=True)
                 video_url, capture_summary = run_pipeline(
                     pr_number=pr_number,
