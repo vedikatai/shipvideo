@@ -73,8 +73,13 @@ def _print_pipeline_summary() -> None:
     # thresholds in milliseconds
     SLOW_THRESHOLD_MS = 5000.0  # 5s and above = red
 
+    # Some steps are composite wrappers (they already include the time of nested steps),
+    # so we don't want to count them again in the TOTAL to avoid double-counting.
+    COMPOSITE_STEPS = {"analyze_pr", "video_pipeline"}
+
     for name, ms in lst:
-        total_ms += ms
+        if name not in COMPOSITE_STEPS:
+            total_ms += ms
         if ms >= SLOW_THRESHOLD_MS:
             color = RED
         else:
