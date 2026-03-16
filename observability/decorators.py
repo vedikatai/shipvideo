@@ -50,8 +50,6 @@ def pipeline_step(step_name: str):
                         duration_ms = (time.time() - start) * 1000
                         span.set_attribute("duration_ms", round(duration_ms, 2))
                         record_step_timing(step_name, duration_ms)
-                        if duration_ms > SLOW_STEP_MS:
-                            print(f"{RED}⚠ SLOW STEP{RESET}", flush=True)
                         color = RED if duration_ms > SLOW_STEP_MS else GREEN
                         print(f"{color}✓ {step_name} ({_format_duration_ms(duration_ms)}){RESET}", flush=True)
                         return result
@@ -75,8 +73,6 @@ def pipeline_step(step_name: str):
                         duration_ms = (time.time() - start) * 1000
                         span.set_attribute("duration_ms", round(duration_ms, 2))
                         record_step_timing(step_name, duration_ms)
-                        if duration_ms > SLOW_STEP_MS:
-                            print(f"{RED}⚠ SLOW STEP{RESET}", flush=True)
                         color = RED if duration_ms > SLOW_STEP_MS else GREEN
                         print(f"{color}✓ {step_name} ({_format_duration_ms(duration_ms)}){RESET}", flush=True)
                         return result
