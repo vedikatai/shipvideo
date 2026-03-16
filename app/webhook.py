@@ -130,6 +130,9 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     commit_sha = ((pr.get("head") or {}).get("sha") or "") if "pull_request" in event else ""
 
     def background_job():
+        # Track LLM cost for this run so we can show it in the summary block.
+        run_llm_cost_usd = 0.0
+        run_budget_status = None
         with pipeline_run_span() as span:
             span.set_attribute("repo", repo_full_name)
             span.set_attribute("pr_number", pr_number)
@@ -177,6 +180,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 )
                 steps = flow.get("steps") or [{"action": "screenshot"}]
                 budget_exceeded = flow.get("budget_exceeded", False)
+                run_llm_cost_usd = float(flow.get("llm_cost_usd", 0.0) or 0.0)
                 span.set_attribute("steps_generated", len(steps))
 
                 print("\n[webhook] === VIDEO PIPELINE ===", flush=True)
@@ -199,6 +203,11 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 with open(summary_path, "w") as f:
                     json.dump(run_summary, f, indent=2)
                 print(f"[webhook] run summary file={summary_path.name}", flush=True)
+                # Capture current budget status for this run (Azure or local).
+                try:
+                    run_budget_status = get_budget_status()
+                except Exception:
+                    run_budget_status = None
                 print("[webhook] posting comment to PR", flush=True)
                 extra_note = None
                 if budget_exceeded:
@@ -212,7 +221,28 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 raise
             finally:
                 # Always print timing summary (e.g. if render or any step crashes)
+                # Include LLM cost for this run and current budget/balance snapshot.
                 print("\n===== PIPELINE SUMMARY =====", flush=True)
+                try:
+                    print(f"LLM this run        ${run_llm_cost_usd:.4f}", flush=True)
+                    if run_budget_status:
+                        spent = float(run_budget_status.get("current_spend_usd", 0.0) or 0.0)
+                        limit = float(run_budget_status.get("limit_usd", 0.0) or 0.0)
+                        source = run_budget_status.get("source", "local")
+                        print(
+                            f"LLM month-to-date   ${spent:.2f} / ${limit:.2f} ({source})",
+                            flush=True,
+                        )
+                        credit = run_budget_status.get("credit_balance")
+                        currency = run_budget_status.get("credit_balance_currency", "USD")
+                        if credit is not None:
+                            print(
+                                f"Azure credit        {credit:.2f} {currency}",
+                                flush=True,
+                            )
+                except Exception:
+                    # Never let logging break the summary.
+                    pass
                 print_pipeline_summary()
 
     Thread(target=background_job).start()
