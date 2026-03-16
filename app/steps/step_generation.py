@@ -75,10 +75,10 @@ async def generate_steps_from_diff(
     fallback_narration = _fallback_narration(pr_title)
 
     try:
-        print("[step_generation] generating steps from diff", flush=True)
+        print("[steps.step_generation] generating steps from diff", flush=True)
 
         if not check_budget():
-            print("[step_generation] budget limit reached; using fallback steps", flush=True)
+            print("[steps.step_generation] budget limit reached; using fallback steps", flush=True)
             return {
                 "steps": FALLBACK_STEPS,
                 "narration": fallback_narration,
@@ -100,7 +100,7 @@ async def generate_steps_from_diff(
         diff_text = json.dumps(diffs_for_prompt, ensure_ascii=False)
         if len(diff_text) > MAX_DIFF_CHARS:
             diff_text = diff_text[:MAX_DIFF_CHARS]
-            print(f"[step_generation] truncated diff to {MAX_DIFF_CHARS} chars", flush=True)
+            print(f"[steps.step_generation] truncated diff to {MAX_DIFF_CHARS} chars", flush=True)
 
         if should_skip_llm_for_size(len(diff_text)):
             return {
@@ -148,7 +148,7 @@ async def generate_steps_from_diff(
         if not (OpenAI and azure_endpoint and azure_key and azure_deployment):
             raise RuntimeError("Azure OpenAI is not configured correctly")
 
-        print("[step_generation] using Azure OpenAI backend", flush=True)
+        print("[steps.step_generation] using Azure OpenAI backend", flush=True)
         base_url = azure_endpoint.rstrip("/")
         if not base_url.endswith("openai/v1"):
             base_url = base_url + "/openai/v1/"
@@ -177,7 +177,7 @@ async def generate_steps_from_diff(
         if not any(
             isinstance(s, dict) and s.get("action") == "screenshot" for s in steps
         ):
-            print("[step_generation] adding fallback screenshot step", flush=True)
+            print("[steps.step_generation] adding fallback screenshot step", flush=True)
             steps.append({"action": "screenshot"})
 
         validated = validate_steps(steps)
@@ -188,7 +188,7 @@ async def generate_steps_from_diff(
             normalized = FALLBACK_STEPS
 
         narration = data.get("narration") or fallback_narration
-        print(f"[step_generation] steps_generated={len(normalized)}", flush=True)
+        print(f"[steps.step_generation] steps_generated={len(normalized)}", flush=True)
         return {
             "steps": normalized,
             "narration": narration,
@@ -197,7 +197,7 @@ async def generate_steps_from_diff(
 
     except Exception as e:
         print(
-            f"[step_generation] failed: {type(e).__name__}: {e}",
+            f"[steps.step_generation] failed: {type(e).__name__}: {e}",
             flush=True,
         )
         return {

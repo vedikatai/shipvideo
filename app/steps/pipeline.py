@@ -43,21 +43,22 @@ async def analyze_pr(
         Dict with keys: steps, narration, llm_cost_usd; optionally budget_exceeded.
     """
     try:
+        print("\n[steps.pipeline] === ANALYZE PR (diff → steps) ===", flush=True)
         print(
-            f"[pipeline] analyzing PR repo={repo_full_name} pr={pr_number}",
+            f"[steps.pipeline/analyze_pr] repo={repo_full_name} pr={pr_number}",
             flush=True,
         )
         diff_files = fetch_pr_diff(repo_full_name, pr_number)
 
         if not diff_files:
-            print("[pipeline] no diff files; using default screenshot", flush=True)
+            print("[steps.pipeline/analyze_pr] no diff files; using default screenshot", flush=True)
             return {
                 "steps": [{"action": "screenshot"}],
                 "narration": "Demo screenshot for this pull request.",
                 "llm_cost_usd": 0.0,
             }
 
-        print(f"[pipeline] files_changed={len(diff_files)}", flush=True)
+        print(f"[steps.pipeline/analyze_pr] files_changed={len(diff_files)}", flush=True)
         flow = await generate_steps_from_diff(
             diff_files, pr_title, staging_url
         )
@@ -73,7 +74,7 @@ async def analyze_pr(
         }
     except Exception as e:
         print(
-            f"[pipeline] analyze_pr failed: {type(e).__name__}: {e}",
+            f"[steps.pipeline/analyze_pr] failed: {type(e).__name__}: {e}",
             flush=True,
         )
         import traceback
@@ -101,6 +102,7 @@ def run_pipeline(
         raise ValueError("preview_url cannot be None or empty")
 
     try:
+        print("\n[steps.pipeline] === VIDEO PIPELINE (capture → render → upload) ===", flush=True)
         capture_summary = run_capture(
             preview_url=preview_url,
             steps=steps,
@@ -113,17 +115,17 @@ def run_pipeline(
         video_url = upload_video(video_path, pr_number=pr_number)
     except subprocess.CalledProcessError as e:
         print(
-            f"[pipeline] subprocess failed returncode={e.returncode}",
+            f"[steps.pipeline/video_pipeline] subprocess failed returncode={e.returncode}",
             flush=True,
         )
         if e.stdout:
-            print(f"[pipeline] stdout: {e.stdout[:500]}", flush=True)
+            print(f"[steps.pipeline/video_pipeline] stdout: {e.stdout[:500]}", flush=True)
         if e.stderr:
-            print(f"[pipeline] stderr: {e.stderr[:500]}", flush=True)
+            print(f"[steps.pipeline/video_pipeline] stderr: {e.stderr[:500]}", flush=True)
         raise
     except Exception as e:
         print(
-            f"[pipeline] error: {type(e).__name__}: {e}",
+            f"[steps.pipeline/video_pipeline] error: {type(e).__name__}: {e}",
             flush=True,
         )
         import traceback

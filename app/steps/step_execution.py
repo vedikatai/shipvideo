@@ -43,7 +43,7 @@ def _wait_networkidle(page: Page) -> None:
         page.wait_for_load_state("networkidle")
     except Exception as e:
         print(
-            f"[step_execution] wait_for_load_state(networkidle) failed: {type(e).__name__}: {e}",
+            f"[steps.step_execution] wait_for_load_state(networkidle) failed: {type(e).__name__}: {e}",
             flush=True,
         )
 
@@ -59,10 +59,10 @@ def safe_click(
         page.click(selector, timeout=CLICK_TIMEOUT_MS)
         return True
     except PlaywrightTimeoutError:
-        print(f"[step_execution] selector timed out: {selector}", flush=True)
+        print(f"[steps.step_execution] selector timed out: {selector}", flush=True)
     except Exception as e:
         print(
-            f"[step_execution] selector failed: {selector} ({type(e).__name__}: {e})",
+            f"[steps.step_execution] selector failed: {selector} ({type(e).__name__}: {e})",
             flush=True,
         )
     return False
@@ -74,10 +74,10 @@ def safe_click_by_text(page: Page, text: str) -> bool:
         page.get_by_text(text).click(timeout=CLICK_TIMEOUT_MS)
         return True
     except PlaywrightTimeoutError:
-        print(f"[step_execution] click by text timed out: {text!r}", flush=True)
+        print(f"[steps.step_execution] click by text timed out: {text!r}", flush=True)
     except Exception as e:
         print(
-            f"[step_execution] click by text failed: {text!r} ({type(e).__name__}: {e})",
+            f"[steps.step_execution] click by text failed: {text!r} ({type(e).__name__}: {e})",
             flush=True,
         )
     return False
@@ -120,7 +120,7 @@ def run_capture(
             _wait_networkidle(page)
         except Exception as e:
             print(
-                f"[step_execution] initial goto failed: {type(e).__name__}: {e}",
+                f"[steps.step_execution] initial goto failed: {type(e).__name__}: {e}",
                 flush=True,
             )
 
@@ -131,14 +131,14 @@ def run_capture(
             try:
                 if action == "screenshot":
                     path = out_dir / f"shot{screenshot_index}.png"
-                    print(f"[step_execution] screenshot file={path.name}", flush=True)
+                    print(f"[steps.step_execution] screenshot file={path.name}", flush=True)
                     page.screenshot(path=str(path))
                     screenshot_index += 1
                 elif action == "click":
                     selector = step.get("selector")
                     text = step.get("text")
                     if selector:
-                        print(f"[step_execution] click selector={selector}", flush=True)
+                        print(f"[steps.step_execution] click selector={selector}", flush=True)
                         ok = safe_click(
                             page,
                             selector,
@@ -148,38 +148,38 @@ def run_capture(
                             step_ok = False
                             last_failure_reason = "selector not found"
                             print(
-                                f"[step_execution] click failed selector={selector}",
+                                f"[steps.step_execution] click failed selector={selector}",
                                 flush=True,
                             )
                         else:
                             _wait_networkidle(page)
                     elif text:
-                        print(f"[step_execution] click text={text!r}", flush=True)
+                        print(f"[steps.step_execution] click text={text!r}", flush=True)
                         ok = safe_click_by_text(page, text)
                         if not ok:
                             step_ok = False
                             last_failure_reason = "selector not found"
                             print(
-                                f"[step_execution] click failed text={text!r}",
+                                f"[steps.step_execution] click failed text={text!r}",
                                 flush=True,
                             )
                         else:
                             _wait_networkidle(page)
                     else:
                         print(
-                            "[step_execution] skip click step (no selector or text)",
+                            "[steps.step_execution] skip click step (no selector or text)",
                             flush=True,
                         )
                         step_ok = False
                 elif action == "goto":
                     target = step.get("url")
                     resolved = _resolve_url(preview_url, target or "/")
-                    print(f"[step_execution] navigating url={target or '/'}", flush=True)
+                    print(f"[steps.step_execution] navigating url={target or '/'}", flush=True)
                     page.goto(resolved)
                     _wait_networkidle(page)
                 else:
                     print(
-                        f"[step_execution] unknown action={action!r} skipping",
+                        f"[steps.step_execution] unknown action={action!r} skipping",
                         flush=True,
                     )
                     step_ok = False
@@ -187,7 +187,7 @@ def run_capture(
                 step_ok = False
                 last_failure_reason = f"{type(e).__name__}: {e}"
                 print(
-                    f"[step_execution] Step {i} failed ({action}): {last_failure_reason}",
+                    f"[steps.step_execution] Step {i} failed ({action}): {last_failure_reason}",
                     flush=True,
                 )
             step_results.append(step_ok)
@@ -196,7 +196,7 @@ def run_capture(
         if not has_shots:
             fallback_path = out_dir / "shot1.png"
             print(
-                "[step_execution] fallback screenshot file=shot1.png",
+                "[steps.step_execution] fallback screenshot file=shot1.png",
                 flush=True,
             )
             page.screenshot(path=str(fallback_path))

@@ -63,16 +63,36 @@ def _print_pipeline_summary() -> None:
     print("", flush=True)
     print("PIPELINE SUMMARY", flush=True)
     total_ms = 0.0
+    # Simple ANSI colors for human-readable timing:
+    # - green: fast/OK
+    # - red: very slow
+    GREEN = "\033[32m"
+    RED = "\033[31m"
+    RESET = "\033[0m"
+
+    # thresholds in milliseconds
+    SLOW_THRESHOLD_MS = 5000.0  # 5s and above = red
+
     for name, ms in lst:
         total_ms += ms
-        if ms >= 1000:
-            print(f"{name:<22} {ms / 1000:.1f} s", flush=True)
+        if ms >= SLOW_THRESHOLD_MS:
+            color = RED
         else:
-            print(f"{name:<22} {ms:.1f} ms", flush=True)
+            color = GREEN
+
+        if ms >= 1000:
+            line = f"{name:<22} {ms / 1000:.1f} s"
+        else:
+            line = f"{name:<22} {ms:.1f} ms"
+        print(f"{color}{line}{RESET}", flush=True)
+
+    # TOTAL line: use red if total is very large, green otherwise
+    total_color = RED if total_ms >= SLOW_THRESHOLD_MS else GREEN
     if total_ms >= 1000:
-        print(f"{'TOTAL':<22} {total_ms / 1000:.1f} s", flush=True)
+        total_line = f"{'TOTAL':<22} {total_ms / 1000:.1f} s"
     else:
-        print(f"{'TOTAL':<22} {total_ms:.1f} ms", flush=True)
+        total_line = f"{'TOTAL':<22} {total_ms:.1f} ms"
+    print(f"{total_color}{total_line}{RESET}", flush=True)
     print("", flush=True)
     lst.clear()
 

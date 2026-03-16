@@ -134,6 +134,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             span.set_attribute("repo", repo_full_name)
             span.set_attribute("pr_number", pr_number)
             try:
+                print("\n[webhook] === PREVIEW RESOLUTION ===", flush=True)
                 if check_already_ran(repo_full_name, pr_number, commit_sha):
                     print("[llm-guards] skipping duplicate run", flush=True)
                     return
@@ -165,6 +166,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     comment_on_pr(repo_full_name, pr_number, None, error_message)
                     return
 
+                print("\n[webhook] === STEP GENERATION ===", flush=True)
                 flow = asyncio.run(
                     analyze_pr(
                         repo_full_name=repo_full_name,
@@ -177,6 +179,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 budget_exceeded = flow.get("budget_exceeded", False)
                 span.set_attribute("steps_generated", len(steps))
 
+                print("\n[webhook] === VIDEO PIPELINE ===", flush=True)
                 video_url, capture_summary = run_pipeline(
                     pr_number=pr_number,
                     preview_url=preview_url,
@@ -209,6 +212,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                 raise
             finally:
                 # Always print timing summary (e.g. if render or any step crashes)
+                print("\n===== PIPELINE SUMMARY =====", flush=True)
                 print_pipeline_summary()
 
     Thread(target=background_job).start()

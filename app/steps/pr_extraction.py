@@ -72,6 +72,6 @@ def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
         page += 1
 
     if page > MAX_PAGES:
-        print(f"[pr_extraction] stopped at max_pages={MAX_PAGES}", flush=True)
-    print(f"[pr_extraction] files_changed={len(result)}", flush=True)
+        print(f"[steps.pr_extraction] stopped at max_pages={MAX_PAGES}", flush=True)
+    print(f"[steps.pr_extraction] files_changed={len(result)}", flush=True)
     return result
