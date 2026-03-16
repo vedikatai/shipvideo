@@ -3,13 +3,12 @@ import hmac, hashlib, json, os, asyncio
 from pathlib import Path
 from fastapi.responses import StreamingResponse
 from threading import Thread
-from app.job_runner import run_pipeline
 from app.github_comment import comment_on_pr
+from app.llm_guards import check_already_ran, get_budget_status, record_run
+from app.steps.pipeline import analyze_pr, run_pipeline
 from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
 from app.config import load_config
 import time
-from app.pr_analyzer import analyze_pr
-from app.llm_guards import check_already_ran, record_run, get_budget_status
 from observability import init_tracing, pipeline_run_span, print_pipeline_summary, set_current_span_error
 
 app = FastAPI()
@@ -34,7 +33,7 @@ GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
 
 # Video path
 BASE_DIR = Path(__file__).resolve().parent
-VIDEO_PATH = BASE_DIR / "out.mp4"
+VIDEO_PATH = BASE_DIR / "screenshots" / "out.mp4"
 
 # -------------------------
 # Serve video

@@ -3,7 +3,9 @@ from pathlib import Path
 import glob
 from observability import pipeline_step
 
-APP_DIR = Path(__file__).resolve().parent
+BASE_APP_DIR = Path(__file__).resolve().parent
+SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Suppress ffmpeg progress/codec spam; only real errors will be shown via -loglevel error
 FFMPEG_LOGLEVEL = "-loglevel", "error"
@@ -12,10 +14,10 @@ FFMPEG_LOGLEVEL = "-loglevel", "error"
 @pipeline_step("render")
 def render_video():
     """Create a video from screenshots. Dynamically finds all shot*.png files in order."""
-    output_path = APP_DIR / "out.mp4"
+    output_path = SCREENSHOT_DIR / "out.mp4"
 
     # Find all screenshot files in order (shot1.png, shot2.png, shot3.png, etc.)
-    shot_files = sorted(glob.glob(str(APP_DIR / "shot*.png")))
+    shot_files = sorted(glob.glob(str(SCREENSHOT_DIR / "shot*.png")))
 
     if not shot_files:
         raise FileNotFoundError("No screenshot files found (shot*.png)")

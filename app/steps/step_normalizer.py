@@ -36,14 +36,11 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 or step.get("element")
                 or step.get("target")
             )
-            if not selector:
-                continue
-            normalized.append(
-                {
-                    "action": "click",
-                    "selector": selector,
-                }
-            )
+            text = (step.get("text") or "").strip()
+            if selector:
+                normalized.append({"action": "click", "selector": selector})
+            elif text:
+                normalized.append({"action": "click", "text": text})
 
         elif action == "goto":
             url = step.get("url", "/")
