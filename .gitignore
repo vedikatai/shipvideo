@@ -15,6 +15,10 @@ venv/
 env/
 app/*.png
 app/data/
+app/screenshots/shot*.png
+app/screenshots/out.mp4
+app/screenshots/debug/*.png
+app/screenshots/debug/*.json
 
 
 shot1.png
