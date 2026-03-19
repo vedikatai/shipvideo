@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from playwright.sync_api import Page, sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 from observability import pipeline_step
+from app.config import load_config
 
 BASE_APP_DIR = Path(__file__).resolve().parent.parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
@@ -46,6 +47,26 @@ GOTO_TIMEOUT_MS = 15000
 CLICK_TIMEOUT_MS = 10000
 STABILITY_POLL_MS = 250
 STABILITY_CHECKS = 6  # ~1.5s stability window
+
+
+@dataclass
+class CaptureSettings:
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    full_page_screenshots: bool = False
+    full_page_debug_screenshots: bool = True
+
+
+def _load_capture_settings() -> CaptureSettings:
+    cfg = load_config()
+    capture_cfg = cfg.get("capture") or {}
+    viewport_cfg = capture_cfg.get("viewport") or {}
+    return CaptureSettings(
+        viewport_width=int(viewport_cfg.get("width", 1280)),
+        viewport_height=int(viewport_cfg.get("height", 720)),
+        full_page_screenshots=bool(capture_cfg.get("full_page_screenshots", False)),
+        full_page_debug_screenshots=bool(capture_cfg.get("full_page_debug_screenshots", True)),
+    )
 
 
 def _log_json(event: str, payload: Dict[str, Any]) -> None:
@@ -74,6 +95,10 @@ def _safe_json_dumps(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False, default=str)
     except Exception:
         return str(obj)
+
+
+def _capture_page_screenshot(page: Page, path: Path, *, full_page: bool) -> None:
+    page.screenshot(path=str(path), full_page=full_page)
 
 
 def _wait_dom_ready(page: Page, timeout_ms: int) -> None:
@@ -314,6 +339,7 @@ def _visual_fallback_click(
     *,
     step: Dict[str, Any],
     screenshot_path: Path,
+    screenshot_full_page: bool,
     max_tokens: int,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
@@ -324,9 +350,11 @@ def _visual_fallback_click(
     """
     vision_deployment = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT")
     if not vision_deployment:
-        raise RuntimeError("Visual fallback required but AZURE_OPENAI_VISION_DEPLOYMENT is not set")
+        raise RuntimeError("visual_fallback_unavailable: AZURE_OPENAI_VISION_DEPLOYMENT is not set")
 
     client = _get_azure_openai_client()
+    # Capture fresh screenshot in the desired mode (viewport vs full-page)
+    _capture_page_screenshot(page, screenshot_path, full_page=screenshot_full_page)
     img_bytes = screenshot_path.read_bytes()
     b64 = base64.b64encode(img_bytes).decode("ascii")
 
@@ -372,11 +400,57 @@ def _visual_fallback_click(
         raise ValueError(f"Vision bbox out of range: {bbox}")
 
     vp = page.viewport_size or {"width": 1280, "height": 720}
-    cx = (x + w / 2.0) * vp["width"]
-    cy = (y + h / 2.0) * vp["height"]
-    page.mouse.click(cx, cy)
+    center_x_norm = x + w / 2.0
+    center_y_norm = y + h / 2.0
+
+    if screenshot_full_page:
+        # Map normalized bbox coordinates to document coordinates, scroll there,
+        # then click in viewport coordinates.
+        dims = page.evaluate(
+            """() => ({
+                docWidth: Math.max(
+                    document.documentElement.scrollWidth || 0,
+                    document.body ? document.body.scrollWidth : 0,
+                    window.innerWidth || 0
+                ),
+                docHeight: Math.max(
+                    document.documentElement.scrollHeight || 0,
+                    document.body ? document.body.scrollHeight : 0,
+                    window.innerHeight || 0
+                ),
+                innerWidth: window.innerWidth || 0,
+                innerHeight: window.innerHeight || 0
+            })"""
+        )
+        doc_w = float(dims.get("docWidth") or vp["width"])
+        doc_h = float(dims.get("docHeight") or vp["height"])
+        inner_w = float(dims.get("innerWidth") or vp["width"])
+        inner_h = float(dims.get("innerHeight") or vp["height"])
+
+        page_x = center_x_norm * doc_w
+        page_y = center_y_norm * doc_h
+
+        target_scroll_x = max(0.0, min(page_x - inner_w / 2.0, max(0.0, doc_w - inner_w)))
+        target_scroll_y = max(0.0, min(page_y - inner_h / 2.0, max(0.0, doc_h - inner_h)))
+        page.evaluate(
+            "(sx, sy) => { window.scrollTo({ left: sx, top: sy, behavior: 'instant' }); }",
+            target_scroll_x,
+            target_scroll_y,
+        )
+        time.sleep(0.15)
+        scroll_pos = page.evaluate("() => ({ x: window.scrollX || 0, y: window.scrollY || 0 })")
+        click_x = page_x - float(scroll_pos.get("x") or 0.0)
+        click_y = page_y - float(scroll_pos.get("y") or 0.0)
+    else:
+        click_x = center_x_norm * vp["width"]
+        click_y = center_y_norm * vp["height"]
+
+    page.mouse.click(click_x, click_y)
     if conf_f is not None:
         bbox["confidence"] = conf_f
+    bbox["click_x"] = float(click_x)
+    bbox["click_y"] = float(click_y)
+    bbox["screenshot_full_page"] = bool(screenshot_full_page)
     return True, bbox
 
 
@@ -386,6 +460,67 @@ def _capture_dom_snapshot(page: Page, *, max_chars: int = 6000) -> str:
         return _trim_text(html, max_chars=max_chars)
     except Exception as e:
         return f"<dom_snapshot_failed: {type(e).__name__}: {e}>"
+
+
+def _collect_runtime_dom_context(page: Page) -> Dict[str, Any]:
+    """
+    Collect a fresh, lightweight DOM context from the current page state.
+    Used for retry-time LLM repair so we don't rely only on stale generation-time crawl.
+    """
+    out: Dict[str, Any] = {
+        "current_path": "",
+        "buttons": [],
+        "links": [],
+        "data_testids": [],
+    }
+    try:
+        out["current_path"] = page.evaluate("() => window.location.pathname || '/'") or "/"
+    except Exception:
+        out["current_path"] = "/"
+
+    try:
+        buttons = page.eval_on_selector_all(
+            "button, [role='button']",
+            """els => els.slice(0, 50).map(e => ({
+                text: (e.innerText || "").trim().slice(0, 80),
+                testid: e.getAttribute('data-testid') || "",
+                aria: e.getAttribute('aria-label') || "",
+                id: e.id || ""
+            }))""",
+        ) or []
+    except Exception:
+        buttons = []
+
+    try:
+        links = page.eval_on_selector_all(
+            "a[href]",
+            """els => els.slice(0, 50).map(e => ({
+                text: (e.innerText || "").trim().slice(0, 80),
+                href: e.getAttribute('href') || "",
+                testid: e.getAttribute('data-testid') || "",
+                aria: e.getAttribute('aria-label') || "",
+                id: e.id || ""
+            }))""",
+        ) or []
+    except Exception:
+        links = []
+
+    try:
+        tids = page.eval_on_selector_all(
+            "[data-testid]",
+            """els => els.slice(0, 80).map(e => ({
+                testid: e.getAttribute('data-testid') || "",
+                tag: e.tagName.toLowerCase(),
+                text: (e.innerText || "").trim().slice(0, 60)
+            }))""",
+        ) or []
+    except Exception:
+        tids = []
+
+    out["buttons"] = buttons
+    out["links"] = links
+    out["data_testids"] = tids
+    return out
 
 
 def _ensure_valid_step_or_raise(step: Dict[str, Any], idx: int) -> None:
@@ -421,6 +556,7 @@ def _replace_failing_step_with_llm(
     error_context: Dict[str, Any],
     diff_files_for_prompt: List[Dict[str, str]],
     dom_data: Dict[str, Any],
+    runtime_dom_context: Optional[Dict[str, Any]],
     max_tokens: int,
     max_replacement_steps: int = 2,
 ) -> List[Dict[str, Any]]:
@@ -428,10 +564,22 @@ def _replace_failing_step_with_llm(
     Ask the LLM to output ONLY replacement steps for the failing step index.
     """
     diffs_for_prompt = diff_files_for_prompt
-    real_routes = generation_context.get("real_routes") or dom_data.get("routes") or ["/"]
-    real_buttons = generation_context.get("real_buttons") or dom_data.get("buttons") or []
-    real_links = generation_context.get("real_links") or dom_data.get("links") or []
-    data_testids = generation_context.get("data_testids") or dom_data.get("data_testids") or []
+    runtime_path = (runtime_dom_context or {}).get("current_path") or "/"
+    runtime_buttons = (runtime_dom_context or {}).get("buttons") or []
+    runtime_links = (runtime_dom_context or {}).get("links") or []
+    runtime_testids = (runtime_dom_context or {}).get("data_testids") or []
+
+    real_routes = (
+        generation_context.get("real_routes")
+        or dom_data.get("routes")
+        or ["/"]
+    )
+    real_routes = list(set(real_routes + [runtime_path]))
+
+    # Prefer fresh runtime DOM context for repair to avoid stale-crawl retries.
+    real_buttons = runtime_buttons or generation_context.get("real_buttons") or dom_data.get("buttons") or []
+    real_links = runtime_links or generation_context.get("real_links") or dom_data.get("links") or []
+    data_testids = runtime_testids or generation_context.get("data_testids") or dom_data.get("data_testids") or []
     real_inputs = generation_context.get("real_inputs") or dom_data.get("inputs") or []
     start_route = generation_context.get("start_route")
 
@@ -443,6 +591,7 @@ def _replace_failing_step_with_llm(
         "• Use ONLY routes from real_routes for goto.\n"
         "• For click, use ONLY selectors from real_buttons or data_testids (prefer [data-testid='x']), "
         "OR exact visible text that appears in real_buttons/real_links.\n"
+        "• Prefer text or stable testid selectors over brittle CSS id/class selectors when uncertain.\n"
         "• Set unused fields to empty string ''.\n"
         "• Never invent selectors or routes not present in the provided DOM crawl.\n"
         "• Return strictly valid JSON.\n"
@@ -452,6 +601,7 @@ def _replace_failing_step_with_llm(
         "failing_step_index": failing_step_index,
         "failing_step": failing_step,
         "error_context": error_context,
+        "runtime_dom_context": runtime_dom_context or {},
         "real_routes": real_routes,
         "real_buttons": real_buttons,
         "real_links": real_links,
@@ -499,6 +649,7 @@ def run_capture(
         raise ValueError("preview_url cannot be None or empty")
     steps = steps or DEFAULT_STEPS
     out_dir = screenshot_dir or SCREENSHOT_DIR
+    capture_settings = _load_capture_settings()
 
     for old_shot in out_dir.glob("shot*.png"):
         old_shot.unlink()
@@ -521,7 +672,12 @@ def run_capture(
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        page = browser.new_page(
+            viewport={
+                "width": capture_settings.viewport_width,
+                "height": capture_settings.viewport_height,
+            }
+        )
         page.goto(preview_url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
         _wait_dom_ready(page, timeout_ms=GOTO_TIMEOUT_MS)
 
@@ -550,7 +706,11 @@ def run_capture(
                     if action == "screenshot":
                         path = out_dir / f"shot{screenshot_index}.png"
                         _log_json("execution.screenshot", {"step_index": i, "path": path.name})
-                        page.screenshot(path=str(path))
+                        _capture_page_screenshot(
+                            page,
+                            path,
+                            full_page=capture_settings.full_page_screenshots,
+                        )
                         screenshot_index += 1
                         step_ok = True
                         break
@@ -579,19 +739,33 @@ def run_capture(
                             )
                             # Visual fallback
                             shot_path = DEBUG_DIR / f"step{i}_attempt{attempt}_visual.png"
-                            page.screenshot(path=str(shot_path))
-                            _log_json("execution.visual_fallback_triggered", {"step_index": i, "shot": shot_path.name})
-                            vision_ok, bbox = _visual_fallback_click(
+                            # Visual fallback can use full-page screenshot mode to
+                            # find elements outside viewport.
+                            _capture_page_screenshot(
                                 page,
-                                step=step,
-                                screenshot_path=shot_path,
-                                max_tokens=500,
+                                shot_path,
+                                full_page=capture_settings.full_page_screenshots,
                             )
-                            if not vision_ok:
-                                raise RuntimeError("Visual fallback click failed")
-                            step_ok = True
-                            attempt_ctx["visual_bbox"] = bbox
-                            break
+                            _log_json("execution.visual_fallback_triggered", {"step_index": i, "shot": shot_path.name})
+                            if os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT"):
+                                vision_ok, bbox = _visual_fallback_click(
+                                    page,
+                                    step=step,
+                                    screenshot_path=shot_path,
+                                    screenshot_full_page=capture_settings.full_page_screenshots,
+                                    max_tokens=500,
+                                )
+                                if not vision_ok:
+                                    raise RuntimeError("Visual fallback click failed")
+                                step_ok = True
+                                attempt_ctx["visual_bbox"] = bbox
+                                break
+                            else:
+                                attempt_ctx["visual_fallback"] = "unavailable"
+                                raise RuntimeError(
+                                    "Selector strategies failed and visual fallback is unavailable "
+                                    "(AZURE_OPENAI_VISION_DEPLOYMENT not set)"
+                                )
 
                         _log_json(
                             "execution.click_success",
@@ -628,7 +802,11 @@ def run_capture(
                     attempt_ctx["dom_snapshot_trimmed"] = dom_snapshot
                     screenshot_path = DEBUG_DIR / f"step{i}_attempt{attempt}_failure.png"
                     try:
-                        page.screenshot(path=str(screenshot_path))
+                        _capture_page_screenshot(
+                            page,
+                            screenshot_path,
+                            full_page=capture_settings.full_page_debug_screenshots,
+                        )
                         attempt_ctx["failure_screenshot"] = screenshot_path.name
                     except Exception:
                         attempt_ctx["failure_screenshot"] = None
@@ -683,6 +861,7 @@ def run_capture(
                             error_context=error_context,
                             diff_files_for_prompt=generation_context.get("diffs_for_prompt") or [],
                             dom_data=generation_context.get("dom_data") or {},
+                            runtime_dom_context=_collect_runtime_dom_context(page),
                             max_tokens=800,
                         )
 

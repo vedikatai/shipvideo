@@ -233,6 +233,11 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     changed_lines += _count_patch_changed_lines(f.get("patch", ""))
 
             if changed_lines < threshold:
+                print(
+                    f"[webhook] smart-skip changed_lines={changed_lines} threshold={threshold} "
+                    f"mode={trigger_mode} repo={repo_full_name} pr={pr_number}",
+                    flush=True,
+                )
                 if skip_comment:
                     comment_on_pr(
                         repo_full_name,
@@ -245,6 +250,12 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         ),
                     )
                 return {"status": "skipped"}
+            else:
+                print(
+                    f"[webhook] smart-run changed_lines={changed_lines} threshold={threshold} "
+                    f"mode={trigger_mode} repo={repo_full_name} pr={pr_number}",
+                    flush=True,
+                )
 
     # --- Case B: issue_comment event ---
     else:

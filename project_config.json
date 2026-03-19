@@ -14,5 +14,13 @@
     "exclude": [".test.", ".spec.", "/tests/", "/test/", "__tests__"]
   },
   "routeMap": {},
-  "appHints": ""
+  "appHints": "",
+  "capture": {
+    "viewport": {
+      "width": 1366,
+      "height": 900
+    },
+    "full_page_screenshots": true,
+    "full_page_debug_screenshots": true
+  }
 }
