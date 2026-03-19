@@ -1,0 +1,77 @@
+name: ShipVideo Engine CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  record-demo:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+      issues: write
+    env:
+      # Required for GitHub PR diff + PR comment
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Required for step generation (Azure OpenAI)
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
+
+      # Optional: only needed if visual fallback is triggered
+      AZURE_OPENAI_VISION_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_VISION_DEPLOYMENT }}
+
+      # Use R2 upload in CI only if you want PR comment URLs to point to real storage.
+      # This workflow uploads artifacts regardless.
+      SHIPVIDEO_UPLOAD_R2: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies (ffmpeg, playwright deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: |
+          python -m playwright install chromium --with-deps
+
+      - name: Run demo recording pipeline
+        env:
+          # Pass PR context to the pipeline runner.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          REPO_FULL_NAME: ${{ github.repository }}
+        run: |
+          python scripts/ci_pipeline.py \
+            --repo "${REPO_FULL_NAME}" \
+            --pr_number "${PR_NUMBER}" \
+            --pr_branch "${PR_BRANCH}"
+
+      - name: Upload video artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shipvideo-engine-out
+          path: |
+            app/screenshots/out.mp4
+            app/screenshots/shot*.png
+            app/screenshots/debug/*.json
+            app/data/pipeline_run_summary.json
+          if-no-files-found: warn
+

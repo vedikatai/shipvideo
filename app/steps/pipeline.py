@@ -14,6 +14,7 @@ Call analyze_pr() for steps + narration; call run_pipeline() for full capture �
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +36,9 @@ async def analyze_pr(
     pr_number: int,
     pr_title: Optional[str],
     staging_url: str,
+    *,
+    diff_files: Optional[List[Dict[str, str]]] = None,
+    start_route: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Fetches PR diff, generates grounded steps and narration via LLM + DOM crawl.
@@ -48,7 +52,7 @@ async def analyze_pr(
             f"[steps.pipeline/analyze_pr] repo={repo_full_name} pr={pr_number}",
             flush=True,
         )
-        diff_files = fetch_pr_diff(repo_full_name, pr_number)
+        diff_files = diff_files if diff_files is not None else fetch_pr_diff(repo_full_name, pr_number)
 
         if not diff_files:
             print("[steps.pipeline/analyze_pr] no diff files; using default screenshot", flush=True)
@@ -60,7 +64,10 @@ async def analyze_pr(
 
         print(f"[steps.pipeline/analyze_pr] files_changed={len(diff_files)}", flush=True)
         flow = await generate_steps_from_diff(
-            diff_files, pr_title, staging_url
+            diff_files,
+            pr_title,
+            staging_url,
+            start_route=start_route,
         )
         steps = flow.get("steps") or [{"action": "screenshot"}]
         narration = flow.get("narration") or "Demo screenshot for this pull request."
@@ -71,6 +78,7 @@ async def analyze_pr(
             "narration": narration,
             "budget_exceeded": budget_exceeded,
             "llm_cost_usd": llm_cost_usd,
+            "generation_context": flow.get("generation_context"),
         }
     except Exception as e:
         print(
@@ -83,6 +91,7 @@ async def analyze_pr(
             "steps": [{"action": "screenshot"}],
             "narration": "Demo screenshot for this pull request (fallback).",
             "llm_cost_usd": 0.0,
+            "generation_context": None,
         }
 
 
@@ -91,6 +100,9 @@ def run_pipeline(
     pr_number: int,
     preview_url: str,
     steps: Optional[List[Dict[str, Any]]] = None,
+    *,
+    generation_context: Optional[Dict[str, Any]] = None,
+    upload: bool = True,
 ) -> tuple:
     """
     Runs capture → render → upload sequentially.
@@ -107,12 +119,25 @@ def run_pipeline(
             preview_url=preview_url,
             steps=steps,
             screenshot_dir=SCREENSHOT_DIR,
+            generation_context=generation_context,
         )
+        if not capture_summary.get("success", False):
+            # Strict failure behavior: refuse to render/upload misleading output.
+            debug = capture_summary.get("debug") or {}
+            raise RuntimeError(
+                "Capture failed and pipeline aborted. "
+                f"steps_failed={capture_summary.get('steps_failed')} "
+                f"failure_reason={capture_summary.get('failure_reason')}. "
+                f"debug_preview={json.dumps(debug, ensure_ascii=False, default=str)[:4000]}"
+            )
         render_video()
         video_path = SCREENSHOT_DIR / "out.mp4"
         if not video_path.exists():
             raise FileNotFoundError(f"Video file not found: {video_path}")
-        video_url = upload_video(video_path, pr_number=pr_number)
+        if upload:
+            video_url = upload_video(video_path, pr_number=pr_number)
+        else:
+            video_url = str(video_path)
     except subprocess.CalledProcessError as e:
         print(
             f"[steps.pipeline/video_pipeline] subprocess failed returncode={e.returncode}",

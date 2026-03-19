@@ -1,16 +1,27 @@
 """
 Step execution: run capture steps (goto, click, screenshot) against a preview URL via Playwright.
 
-Single responsibility: take a list of normalized steps and a preview URL, execute them
-in order, and write screenshots to disk. Uses networkidle after goto/click. Failed steps
-are logged; pipeline does not crash on a single step failure.
+Production-grade responsibilities:
+- Deterministic timing hardening (element-level waits, bounded stability checks)
+- Accessibility-first selector strategy with scoring/logging
+- Visual fallback click (last resort) when selectors fail
+- Self-healing retry loop (max 3) with LLM feedback that replaces ONLY the failing step
+- Strict failure behavior: never produce misleading successful recordings
+
+This module is intentionally verbose in structured logging to make debugging reliable.
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
+import re
 import sys
+import time
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page, sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -19,13 +30,27 @@ from observability import pipeline_step
 BASE_APP_DIR = Path(__file__).resolve().parent.parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+DEBUG_DIR = SCREENSHOT_DIR / "debug"
+DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_STEPS: List[Dict[str, Any]] = [
     {"action": "screenshot"},
     {"action": "screenshot"},
 ]
 
-CLICK_TIMEOUT_MS = 2000
+MAX_STEP_RETRIES = 3
+
+# Base timeouts are tuned for CI and real-world B2B apps; they are further bounded
+# by element presence and stability checks.
+GOTO_TIMEOUT_MS = 15000
+CLICK_TIMEOUT_MS = 10000
+STABILITY_POLL_MS = 250
+STABILITY_CHECKS = 6  # ~1.5s stability window
+
+
+def _log_json(event: str, payload: Dict[str, Any]) -> None:
+    msg = {"event": event, **payload}
+    print(json.dumps(msg, ensure_ascii=False), flush=True)
 
 
 def _resolve_url(preview_url: str, path: str) -> str:
@@ -37,50 +62,418 @@ def _resolve_url(preview_url: str, path: str) -> str:
     return preview_url.rstrip("/") + "/" + path.lstrip("/")
 
 
-def _wait_networkidle(page: Page) -> None:
-    """Wait for networkidle; log and continue on failure (never crash pipeline)."""
+def _trim_text(s: str, max_chars: int) -> str:
+    s = s or ""
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + "\n... (trimmed)"
+
+
+def _safe_json_dumps(obj: Any) -> str:
     try:
-        page.wait_for_load_state("networkidle")
+        return json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        return str(obj)
+
+
+def _wait_dom_ready(page: Page, timeout_ms: int) -> None:
+    """Wait for a deterministic readiness signal (domcontentloaded + readyState)."""
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    last_err: Optional[str] = None
+    while time.monotonic() < deadline:
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+            page.wait_for_function("document.readyState === 'complete'", timeout=5000)
+            return
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            time.sleep(0.1)
+    if last_err:
+        raise RuntimeError(f"DOM ready check failed: {last_err}")
+
+
+def _wait_locator_stable(page: Page, locator, *, timeout_ms: int) -> None:
+    """
+    Stability heuristic:
+    - bounding box exists
+    - bounding box position/size doesn't change across several polls
+    """
+    end = time.monotonic() + timeout_ms / 1000.0
+    last_box: Optional[Dict[str, float]] = None
+    stable_hits = 0
+
+    while time.monotonic() < end:
+        try:
+            box = locator.bounding_box()
+            if not box:
+                stable_hits = 0
+                last_box = None
+                time.sleep(STABILITY_POLL_MS / 1000.0)
+                continue
+            # Normalize keys for comparison.
+            box_norm = {
+                "x": round(float(box.get("x", 0.0)), 1),
+                "y": round(float(box.get("y", 0.0)), 1),
+                "w": round(float(box.get("width", 0.0)), 1),
+                "h": round(float(box.get("height", 0.0)), 1),
+            }
+            if last_box == box_norm:
+                stable_hits += 1
+            else:
+                stable_hits = 0
+            last_box = box_norm
+            if stable_hits >= STABILITY_CHECKS:
+                return
+        except Exception:
+            stable_hits = 0
+        time.sleep(STABILITY_POLL_MS / 1000.0)
+
+    raise TimeoutError("Locator stability check timed out")
+
+
+def _selector_strategy_from_step(selector: str) -> List[Tuple[str, str]]:
+    """
+    Convert a step selector into a ranked set of strategies.
+
+    Returns list of (strategy_name, value) where value is used by Playwright APIs.
+    """
+    s = (selector or "").strip()
+    if not s:
+        return []
+
+    # data-testid style: [data-testid='x'] or [data-testid="x"]
+    m = re.match(r"^\[data-testid=(['\"])(.+?)\1\]$", s)
+    if m:
+        return [("test_id", m.group(2))]
+
+    # aria-label style: [aria-label='x'] or [aria-label="x"]
+    m = re.match(r"^\[aria-label=(['\"])(.+?)\1\]$", s)
+    if m:
+        return [("aria_label", m.group(2))]
+
+    # css id
+    if s.startswith("#"):
+        return [("css_id", s[1:]), ("css", s)]
+
+    return [("css", s)]
+
+
+def _compute_click_confidence(step: Dict[str, Any]) -> float:
+    """
+    Coarse confidence scoring:
+    - testid/aria-label selectors are most stable
+    - css/id is medium
+    - text-only is least stable
+    """
+    if (step.get("selector") or "").strip():
+        selector = (step.get("selector") or "").strip()
+        if selector.startswith("[data-testid=") and "]" in selector:
+            return 0.95
+        if selector.startswith("[aria-label=") and "]" in selector:
+            return 0.85
+        if selector.startswith("#"):
+            return 0.7
+        return 0.5
+    if (step.get("text") or "").strip():
+        return 0.45
+    return 0.0
+
+
+def _extract_step_descriptor(step: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "selector": (step.get("selector") or "").strip(),
+        "text": (step.get("text") or "").strip(),
+        "label": (step.get("label") or "").strip(),
+    }
+
+
+def _get_azure_openai_client() -> Any:
+    try:
+        from openai import OpenAI  # type: ignore
     except Exception as e:
-        print(
-            f"[steps.step_execution] wait_for_load_state(networkidle) failed: {type(e).__name__}: {e}",
-            flush=True,
-        )
+        raise RuntimeError(f"OpenAI client not available: {e}")
+
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
+    if not azure_endpoint or not azure_key:
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY must be set")
+
+    base_url = azure_endpoint.rstrip("/")
+    if not base_url.endswith("openai/v1"):
+        base_url = base_url + "/openai/v1/"
+
+    return OpenAI(base_url=base_url, api_key=azure_key)
 
 
-def safe_click(
-    page: Page,
-    selector: str,
+def _call_llm_replace_step(
     *,
-    description: Optional[str] = None,
-) -> bool:
-    """Click by selector. Returns True on success, False on timeout or error."""
-    try:
-        page.click(selector, timeout=CLICK_TIMEOUT_MS)
-        return True
-    except PlaywrightTimeoutError:
-        print(f"[steps.step_execution] selector timed out: {selector}", flush=True)
-    except Exception as e:
-        print(
-            f"[steps.step_execution] selector failed: {selector} ({type(e).__name__}: {e})",
-            flush=True,
-        )
-    return False
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+) -> Dict[str, Any]:
+    """
+    Call Azure OpenAI with strict json_schema to get replacement steps.
+    """
+    client = _get_azure_openai_client()
+    azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    if not azure_deployment:
+        raise RuntimeError("AZURE_OPENAI_DEPLOYMENT must be set")
+
+    replacement_schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "replacement_steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["goto", "click", "screenshot"]},
+                        "url": {"type": "string"},
+                        "selector": {"type": "string"},
+                        "text": {"type": "string"},
+                        "label": {"type": "string"},
+                    },
+                    "required": ["action", "url", "selector", "text", "label"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["replacement_steps"],
+        "additionalProperties": False,
+    }
+
+    # Structured output where supported; fallback to json_object not implemented
+    # here because execution-time regeneration must not silently degrade.
+    completion = client.chat.completions.create(
+        model=azure_deployment,
+        messages=messages,
+        temperature=0.2,
+        max_tokens=max_tokens,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "replacement_steps",
+                "strict": True,
+                "schema": replacement_schema,
+            },
+        },
+    )
+    content = completion.choices[0].message.content or "{}"
+    return json.loads(content)
 
 
-def safe_click_by_text(page: Page, text: str) -> bool:
-    """Click by visible text. Returns True on success, False on timeout or error."""
+def _click_with_strategies(page: Page, step: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Try click via selector/text strategies.
+    Returns (ok, strategy_name).
+    """
+    selector = (step.get("selector") or "").strip()
+    text = (step.get("text") or "").strip()
+
+    # Strategy: selector-based
+    if selector:
+        strategies = _selector_strategy_from_step(selector)
+        for name, value in strategies:
+            try:
+                if name == "test_id":
+                    loc = page.get_by_test_id(value)
+                elif name == "aria_label":
+                    loc = page.get_by_label(value)
+                elif name == "css_id":
+                    loc = page.locator(f"#{value}")
+                elif name == "css":
+                    loc = page.locator(value)
+                else:
+                    continue
+
+                loc.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
+                _wait_locator_stable(page, loc, timeout_ms=int(CLICK_TIMEOUT_MS * 0.8))
+                loc.click(timeout=CLICK_TIMEOUT_MS)
+                return True, name
+            except Exception:
+                continue
+
+    # Strategy: text-based
+    if text:
+        for exact in (True, False):
+            try:
+                loc = page.get_by_text(text, exact=exact)
+                loc.first.wait_for(state="visible", timeout=CLICK_TIMEOUT_MS)
+                _wait_locator_stable(page, loc.first, timeout_ms=int(CLICK_TIMEOUT_MS * 0.8))
+                loc.first.click(timeout=CLICK_TIMEOUT_MS)
+                return True, f"text_exact={exact}"
+            except Exception:
+                continue
+
+    return False, "all_strategies_failed"
+
+
+def _visual_fallback_click(
+    page: Page,
+    *,
+    step: Dict[str, Any],
+    screenshot_path: Path,
+    max_tokens: int,
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Last-resort visual fallback: identify the element in the screenshot and click by coordinates.
+
+    Requires:
+    - AZURE_OPENAI_VISION_DEPLOYMENT set
+    """
+    vision_deployment = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT")
+    if not vision_deployment:
+        raise RuntimeError("Visual fallback required but AZURE_OPENAI_VISION_DEPLOYMENT is not set")
+
+    client = _get_azure_openai_client()
+    img_bytes = screenshot_path.read_bytes()
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+
+    descriptor = _extract_step_descriptor(step)
+    prompt = (
+        "You are a UI vision assistant. Identify the element that matches this descriptor and provide "
+        "a bounding box in normalized coordinates relative to the screenshot.\n\n"
+        f"Descriptor: {json.dumps(descriptor, ensure_ascii=False)}\n\n"
+        "Return ONLY JSON with schema:\n"
+        "{ \"x\": number, \"y\": number, \"width\": number, \"height\": number, \"confidence\": number }\n"
+        "Where x,y,width,height are in [0,1].\n"
+        "x,y represent top-left of the box."
+    )
+
+    # Note: we intentionally do not use json_schema here to keep compatibility. We'll parse manually.
+    completion = client.chat.completions.create(
+        model=vision_deployment,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            }
+        ],
+        temperature=0.2,
+        max_tokens=max_tokens,
+    )
+    content = completion.choices[0].message.content or "{}"
+    start, end = content.find("{"), content.rfind("}")
+    if start != -1 and end > start:
+        content = content[start : end + 1]
+    bbox = json.loads(content)
+
+    x = float(bbox.get("x"))
+    y = float(bbox.get("y"))
+    w = float(bbox.get("width"))
+    h = float(bbox.get("height"))
+    conf = bbox.get("confidence")
+    conf_f = float(conf) if conf is not None else None
+    if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and w > 0 and h > 0):
+        raise ValueError(f"Vision bbox out of range: {bbox}")
+
+    vp = page.viewport_size or {"width": 1280, "height": 720}
+    cx = (x + w / 2.0) * vp["width"]
+    cy = (y + h / 2.0) * vp["height"]
+    page.mouse.click(cx, cy)
+    if conf_f is not None:
+        bbox["confidence"] = conf_f
+    return True, bbox
+
+
+def _capture_dom_snapshot(page: Page, *, max_chars: int = 6000) -> str:
     try:
-        page.get_by_text(text).click(timeout=CLICK_TIMEOUT_MS)
-        return True
-    except PlaywrightTimeoutError:
-        print(f"[steps.step_execution] click by text timed out: {text!r}", flush=True)
+        html = page.content()
+        return _trim_text(html, max_chars=max_chars)
     except Exception as e:
-        print(
-            f"[steps.step_execution] click by text failed: {text!r} ({type(e).__name__}: {e})",
-            flush=True,
+        return f"<dom_snapshot_failed: {type(e).__name__}: {e}>"
+
+
+def _ensure_valid_step_or_raise(step: Dict[str, Any], idx: int) -> None:
+    action = step.get("action")
+    if action not in {"goto", "click", "screenshot"}:
+        raise ValueError(f"Invalid step action at idx={idx}: {action!r}")
+    if action == "goto" and not (step.get("url") or "").strip():
+        raise ValueError(f"Invalid goto step at idx={idx}: missing url")
+    if action == "click":
+        if not (step.get("selector") or "").strip() and not (step.get("text") or "").strip():
+            raise ValueError(f"Invalid click step at idx={idx}: missing selector and text")
+    if action == "screenshot" and not isinstance(step.get("label", ""), str):
+        # label is optional for execution but schema expects string
+        raise ValueError(f"Invalid screenshot step at idx={idx}: label type")
+
+
+def _validate_steps_strict(steps: List[Dict[str, Any]], dom_data: Dict[str, Any], diff_files: Optional[List[Dict[str, str]]]) -> None:
+    from app.steps.step_normalizer import validate_against_dom, validate_steps
+    normalized = validate_steps(steps)
+    validated = validate_against_dom(normalized, dom_data, diff_files)
+    if len(validated) != len(normalized):
+        raise RuntimeError(
+            "Strict validation failed: some steps do not exist in the live DOM "
+            f"(accepted={len(validated)} expected={len(normalized)})"
         )
-    return False
+
+
+def _replace_failing_step_with_llm(
+    *,
+    generation_context: Dict[str, Any],
+    failing_step: Dict[str, Any],
+    failing_step_index: int,
+    error_context: Dict[str, Any],
+    diff_files_for_prompt: List[Dict[str, str]],
+    dom_data: Dict[str, Any],
+    max_tokens: int,
+    max_replacement_steps: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    Ask the LLM to output ONLY replacement steps for the failing step index.
+    """
+    diffs_for_prompt = diff_files_for_prompt
+    real_routes = generation_context.get("real_routes") or dom_data.get("routes") or ["/"]
+    real_buttons = generation_context.get("real_buttons") or dom_data.get("buttons") or []
+    real_links = generation_context.get("real_links") or dom_data.get("links") or []
+    data_testids = generation_context.get("data_testids") or dom_data.get("data_testids") or []
+    real_inputs = generation_context.get("real_inputs") or dom_data.get("inputs") or []
+    start_route = generation_context.get("start_route")
+
+    system_msg = (
+        "You are a demo-flow self-healing assistant.\n"
+        "A previously generated demo step failed. You must output ONLY replacement_steps "
+        "for the failing step index.\n\n"
+        "Rules:\n"
+        "• Use ONLY routes from real_routes for goto.\n"
+        "• For click, use ONLY selectors from real_buttons or data_testids (prefer [data-testid='x']), "
+        "OR exact visible text that appears in real_buttons/real_links.\n"
+        "• Set unused fields to empty string ''.\n"
+        "• Never invent selectors or routes not present in the provided DOM crawl.\n"
+        "• Return strictly valid JSON.\n"
+    )
+
+    user_msg = {
+        "failing_step_index": failing_step_index,
+        "failing_step": failing_step,
+        "error_context": error_context,
+        "real_routes": real_routes,
+        "real_buttons": real_buttons,
+        "real_links": real_links,
+        "real_inputs": real_inputs,
+        "data_testids": data_testids,
+        "start_route": start_route,
+        "diff_files_for_prompt": diffs_for_prompt,
+    }
+
+    messages = [{"role": "system", "content": system_msg}, {"role": "user", "content": json.dumps(user_msg, ensure_ascii=False)}]
+    data = _call_llm_replace_step(messages=messages, max_tokens=max_tokens)
+
+    replacement = data.get("replacement_steps") or []
+    if not isinstance(replacement, list) or len(replacement) == 0 or len(replacement) > max_replacement_steps:
+        raise ValueError(f"LLM returned invalid replacement_steps: {replacement!r}")
+
+    # Normalize replacement steps to executor format (supports selector/text click).
+    from app.steps.step_normalizer import normalize_steps, validate_steps
+    replacement_valid = validate_steps(replacement)
+    replacement_normalized = normalize_steps(replacement_valid)
+
+    return replacement_normalized
 
 
 @pipeline_step("step_execution")
@@ -89,6 +482,7 @@ def run_capture(
     steps: Optional[List[Dict[str, Any]]] = None,
     *,
     screenshot_dir: Optional[Path] = None,
+    generation_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Execute capture steps against the preview URL and write screenshots to disk.
@@ -99,7 +493,7 @@ def run_capture(
         screenshot_dir: Directory for shot*.png files; defaults to app/screenshots directory.
 
     Returns:
-        Dict with steps_succeeded, steps_failed, failure_reason (last failure if any).
+        Dict with steps_succeeded, steps_failed, failure_reason, success, debug.
     """
     if not preview_url:
         raise ValueError("preview_url cannot be None or empty")
@@ -111,104 +505,227 @@ def run_capture(
 
     step_results: List[bool] = []
     last_failure_reason: Optional[str] = None
+    debug: Dict[str, Any] = {"steps": []}
+
+    # Strict pre-validation: if we have generation_context, validate steps exist.
+    dom_data = generation_context.get("dom_data") if generation_context else None
+    diffs_for_prompt = generation_context.get("diffs_for_prompt") if generation_context else None
+    if generation_context:
+        if not dom_data:
+            raise ValueError("generation_context.dom_data missing")
+        if "diffs_for_prompt" in generation_context:
+            diffs_for_prompt = generation_context["diffs_for_prompt"]
+        else:
+            diffs_for_prompt = None
+        _validate_steps_strict(steps, dom_data, diffs_for_prompt)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        try:
-            page.goto(preview_url)
-            _wait_networkidle(page)
-        except Exception as e:
-            print(
-                f"[steps.step_execution] initial goto failed: {type(e).__name__}: {e}",
-                flush=True,
-            )
+        page.goto(preview_url, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+        _wait_dom_ready(page, timeout_ms=GOTO_TIMEOUT_MS)
 
         screenshot_index = 1
-        for i, step in enumerate(steps):
-            action = step.get("action")
-            step_ok = True
-            try:
-                if action == "screenshot":
-                    path = out_dir / f"shot{screenshot_index}.png"
-                    print(f"[steps.step_execution] screenshot file={path.name}", flush=True)
-                    page.screenshot(path=str(path))
-                    screenshot_index += 1
-                elif action == "click":
-                    selector = step.get("selector")
-                    text = step.get("text")
-                    if selector:
-                        print(f"[steps.step_execution] click selector={selector}", flush=True)
-                        ok = safe_click(
-                            page,
-                            selector,
-                            description=step.get("description") or step.get("text"),
-                        )
-                        if not ok:
-                            step_ok = False
-                            last_failure_reason = "selector not found"
-                            print(
-                                f"[steps.step_execution] click failed selector={selector}",
-                                flush=True,
-                            )
-                        else:
-                            _wait_networkidle(page)
-                    elif text:
-                        print(f"[steps.step_execution] click text={text!r}", flush=True)
-                        ok = safe_click_by_text(page, text)
-                        if not ok:
-                            step_ok = False
-                            last_failure_reason = "selector not found"
-                            print(
-                                f"[steps.step_execution] click failed text={text!r}",
-                                flush=True,
-                            )
-                        else:
-                            _wait_networkidle(page)
-                    else:
-                        print(
-                            "[steps.step_execution] skip click step (no selector or text)",
-                            flush=True,
-                        )
-                        step_ok = False
-                elif action == "goto":
-                    target = step.get("url")
-                    resolved = _resolve_url(preview_url, target or "/")
-                    print(f"[steps.step_execution] navigating url={target or '/'}", flush=True)
-                    page.goto(resolved)
-                    _wait_networkidle(page)
-                else:
-                    print(
-                        f"[steps.step_execution] unknown action={action!r} skipping",
-                        flush=True,
-                    )
-                    step_ok = False
-            except Exception as e:
-                step_ok = False
-                last_failure_reason = f"{type(e).__name__}: {e}"
-                print(
-                    f"[steps.step_execution] Step {i} failed ({action}): {last_failure_reason}",
-                    flush=True,
-                )
-            step_results.append(step_ok)
+        working_steps: List[Dict[str, Any]] = list(steps)
 
+        i = 0
+        while i < len(working_steps):
+            step = working_steps[i]
+            action = step.get("action")
+            _ensure_valid_step_or_raise(step, i)
+
+            step_debug: Dict[str, Any] = {
+                "index": i,
+                "action": action,
+                "step": step,
+                "attempts": [],
+            }
+
+            step_ok = False
+            for attempt in range(1, MAX_STEP_RETRIES + 1):
+                attempt_ctx: Dict[str, Any] = {"attempt": attempt}
+                try:
+                    _log_json("execution.step_start", {"step_index": i, "attempt": attempt, "action": action})
+
+                    if action == "screenshot":
+                        path = out_dir / f"shot{screenshot_index}.png"
+                        _log_json("execution.screenshot", {"step_index": i, "path": path.name})
+                        page.screenshot(path=str(path))
+                        screenshot_index += 1
+                        step_ok = True
+                        break
+
+                    if action == "goto":
+                        target = (step.get("url") or "").strip()
+                        resolved = _resolve_url(preview_url, target)
+                        expected_path = resolved
+                        _log_json("execution.goto", {"step_index": i, "resolved": resolved})
+                        page.goto(resolved, wait_until="domcontentloaded", timeout=GOTO_TIMEOUT_MS)
+                        _wait_dom_ready(page, timeout_ms=GOTO_TIMEOUT_MS)
+                        step_ok = True
+                        break
+
+                    if action == "click":
+                        conf = _compute_click_confidence(step)
+                        if conf < 0.2:
+                            raise RuntimeError(f"Low-confidence click step (confidence={conf:.2f}): {step!r}")
+
+                        ok, strategy = _click_with_strategies(page, step)
+                        if not ok:
+                            # Last resort visual fallback.
+                            _log_json(
+                                "execution.selector_strategies_failed",
+                                {"step_index": i, "selector": step.get("selector"), "text": step.get("text"), "strategy": strategy},
+                            )
+                            # Visual fallback
+                            shot_path = DEBUG_DIR / f"step{i}_attempt{attempt}_visual.png"
+                            page.screenshot(path=str(shot_path))
+                            _log_json("execution.visual_fallback_triggered", {"step_index": i, "shot": shot_path.name})
+                            vision_ok, bbox = _visual_fallback_click(
+                                page,
+                                step=step,
+                                screenshot_path=shot_path,
+                                max_tokens=500,
+                            )
+                            if not vision_ok:
+                                raise RuntimeError("Visual fallback click failed")
+                            step_ok = True
+                            attempt_ctx["visual_bbox"] = bbox
+                            break
+
+                        _log_json(
+                            "execution.click_success",
+                            {
+                                "step_index": i,
+                                "confidence": conf,
+                                "strategy": strategy,
+                            },
+                        )
+
+                        # After click: wait for DOM/body stability (bounded).
+                        # We do not rely on networkidle.
+                        previous_text = None
+                        for _ in range(10):
+                            try:
+                                txt = page.evaluate("() => document.body ? document.body.innerText : ''")
+                                if txt == previous_text and txt:
+                                    break
+                                previous_text = txt
+                            except Exception:
+                                break
+                            time.sleep(0.25)
+
+                        step_ok = True
+                        break
+
+                    raise RuntimeError(f"Unknown action at runtime: {action!r}")
+
+                except Exception as e:
+                    err_msg = f"{type(e).__name__}: {e}"
+                    last_failure_reason = err_msg
+                    attempt_ctx["error"] = err_msg
+                    dom_snapshot = _capture_dom_snapshot(page)
+                    attempt_ctx["dom_snapshot_trimmed"] = dom_snapshot
+                    screenshot_path = DEBUG_DIR / f"step{i}_attempt{attempt}_failure.png"
+                    try:
+                        page.screenshot(path=str(screenshot_path))
+                        attempt_ctx["failure_screenshot"] = screenshot_path.name
+                    except Exception:
+                        attempt_ctx["failure_screenshot"] = None
+
+                    _log_json(
+                        "execution.step_failed",
+                        {"step_index": i, "attempt": attempt, "action": action, "error": err_msg},
+                    )
+
+                    # Retry with LLM feedback if we have generation_context.
+                    if attempt < MAX_STEP_RETRIES:
+                        if not generation_context:
+                            raise RuntimeError("LLM retry requires generation_context but it was not provided")
+
+                        error_context = {
+                            "failed_step_index": i,
+                            "failed_step": step,
+                            "error_message": err_msg,
+                            "selector_used": (step.get("selector") or "").strip() or (step.get("text") or "").strip(),
+                            "dom_snapshot_trimmed": dom_snapshot,
+                            "failure_screenshot_path": str(attempt_ctx.get("failure_screenshot") or ""),
+                        }
+
+                        trace_path = DEBUG_DIR / f"step{i}_attempt{attempt}_trace.json"
+                        try:
+                            trace_path.write_text(
+                                json.dumps(
+                                    {
+                                        "step_index": i,
+                                        "attempt": attempt,
+                                        "failed_step": step,
+                                        "error_context": error_context,
+                                    },
+                                    ensure_ascii=False,
+                                    default=str,
+                                ),
+                                encoding="utf-8",
+                            )
+                        except Exception:
+                            pass
+
+                        _log_json(
+                            "execution.llm_retry_triggered",
+                            {"step_index": i, "attempt": attempt, "error": err_msg},
+                        )
+
+                        # Retry replacement
+                        replacement_steps = _replace_failing_step_with_llm(
+                            generation_context=generation_context,
+                            failing_step=step,
+                            failing_step_index=i,
+                            error_context=error_context,
+                            diff_files_for_prompt=generation_context.get("diffs_for_prompt") or [],
+                            dom_data=generation_context.get("dom_data") or {},
+                            max_tokens=800,
+                        )
+
+                        if not replacement_steps:
+                            raise RuntimeError("LLM returned no replacement_steps")
+
+                        # Replace ONLY the failing step with replacement_steps.
+                        working_steps[i : i + 1] = replacement_steps
+                        step_debug["attempts"].append(attempt_ctx)
+
+                        # Continue to next attempt by retrying same step index.
+                        continue
+
+                    # Exhausted retries: fail loud with full debug context.
+                    step_debug["attempts"].append(attempt_ctx)
+                    step_results.append(False)
+                    debug["steps"].append(step_debug)
+                    raise RuntimeError(
+                        f"Unrecoverable step failure at index={i}, action={action}. "
+                        f"Debug: {json.dumps(step_debug, ensure_ascii=False)[:8000]}"
+                    )
+
+            if step_ok:
+                step_results.append(True)
+                step_debug["attempts"].append({"attempt": "final_success"})
+                debug["steps"].append(step_debug)
+                i += 1
+
+        # Ensure at least one screenshot exists; otherwise it's invalid output.
         has_shots = any(out_dir.glob("shot*.png"))
         if not has_shots:
-            fallback_path = out_dir / "shot1.png"
-            print(
-                "[steps.step_execution] fallback screenshot file=shot1.png",
-                flush=True,
-            )
-            page.screenshot(path=str(fallback_path))
-
+            raise RuntimeError("No screenshots were captured; refusing to render misleading output.")
         browser.close()
 
     succeeded = sum(1 for r in step_results if r)
     failed = len(step_results) - succeeded
+    success = failed == 0
     return {
         "steps_succeeded": succeeded,
         "steps_failed": failed,
         "failure_reason": last_failure_reason if failed else None,
+        "success": success,
+        "debug": debug,
     }
 
 
