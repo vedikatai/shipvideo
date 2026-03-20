@@ -23,7 +23,12 @@ from app.llm_guards import (
     record_spend,
     should_skip_llm_for_size,
 )
-from app.steps.step_normalizer import normalize_steps, validate_against_dom, validate_steps
+from app.steps.step_normalizer import (
+    normalize_steps,
+    validate_against_dom,
+    validate_steps,
+    _extract_routes_from_diff,
+)
 from app.config import load_config
 from observability import pipeline_step
 
@@ -212,21 +217,24 @@ async def generate_steps_from_diff(
         if start_route and start_route != "/":
             allowed_routes_override = {start_route}
 
-        dom_data = await crawl_dom_data(staging_url)
-        real_routes = dom_data.get("routes") or ["/"]
-
         # ------------------------------------------------------------------
-        # Diff → routeMap mapping + appHints injection (git-glimpse parity)
+        # Compute seed_routes BEFORE crawl (Phase 3): multi-route BFS visits
+        # diff-relevant pages first, so LLM never hallucinates selectors for
+        # routes it hasn't seen.
         # ------------------------------------------------------------------
         config = load_config()
         route_map: Dict[str, Any] = config.get("routeMap") or {}
         app_hints: Any = config.get("appHints") or ""
 
-        # When general_demo=True (triggered by a non-UI diff, e.g. config change),
-        # skip diff-based route mapping so we produce a homepage-only demo rather
-        # than trying to navigate to feature routes that aren't in the diff.
+        seed_routes: List[str] = []
+        mapped_routes: set[str] = set()
+
+        # When general_demo=True skip feature-route seeding; homepage-only crawl.
         if not general_demo:
-            mapped_routes: set[str] = set()
+            # 1. Diff-inferred routes (highest priority — directly changed pages)
+            diff_seed = sorted(_extract_routes_from_diff(diff_files))
+
+            # 2. routeMap-mapped routes (config-declared feature routes)
             for f in diff_files:
                 fpath = f.get("path") or ""
                 for pattern, routes in route_map.items():
@@ -241,9 +249,28 @@ async def generate_steps_from_diff(
                                 if isinstance(r, str) and r.strip():
                                     mapped_routes.add(r.strip())
 
-            if mapped_routes:
-                dom_data["routes"] = list(set((dom_data.get("routes") or []) + list(mapped_routes)))
-                real_routes = dom_data["routes"]
+            # Merge: diff-inferred first, then routeMap (deduped, order-preserving)
+            _seen_seeds: set = set()
+            for r in diff_seed + sorted(mapped_routes):
+                if r not in _seen_seeds:
+                    _seen_seeds.add(r)
+                    seed_routes.append(r)
+
+        # When start_route restricts the demo to one route, restrict the crawl
+        # too.  Otherwise the LLM receives buttons from irrelevant routes while
+        # real_routes only lists the override route — an inconsistent context
+        # that degrades selector grounding.
+        if allowed_routes_override:
+            seed_routes = [r for r in seed_routes if r in allowed_routes_override]
+
+        dom_data = await crawl_dom_data(staging_url, seed_routes=seed_routes)
+        real_routes = dom_data.get("routes") or ["/"]
+
+        # Ensure routeMap-mapped routes appear in the LLM route list even if
+        # max_routes was hit and the crawler didn't visit all of them.
+        if not general_demo and mapped_routes:
+            dom_data["routes"] = list(set((dom_data.get("routes") or []) + list(mapped_routes)))
+            real_routes = dom_data["routes"]
 
         # Normalize hints into a string for prompt injection.
         if isinstance(app_hints, dict):

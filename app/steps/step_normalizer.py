@@ -5,6 +5,16 @@ from typing import Any, Dict, List, Optional, Set
 VALID_ACTIONS = {"goto", "click", "screenshot"}
 
 
+def _normalize_selector_quotes(selector: str) -> str:
+    """Normalize attribute selector to single-quote form for consistent set membership.
+
+    The crawler generates selectors with single quotes: [data-testid='x'].
+    The LLM may output double quotes: [data-testid="x"].
+    Without normalization, validate_against_dom rejects perfectly valid steps.
+    """
+    return re.sub(r'\[(\w[\w-]*)\s*=\s*"([^"]+)"\]', r"[\1='\2']", selector)
+
+
 def validate_steps(steps: Any) -> List[Dict[str, Any]]:
     """
     Keep only steps with a known action to avoid executor crashes.
@@ -168,8 +178,11 @@ def validate_against_dom(
 
         if action == "click":
             selector = (step.get("selector") or "").strip()
+            # Normalize quote style before set lookup so [data-testid="x"]
+            # matches the single-quote form stored by _short_selector.
+            selector_norm = _normalize_selector_quotes(selector) if selector else ""
             text = (step.get("text") or "").strip()
-            if (selector and selector in valid_selectors) or (text and text in valid_texts):
+            if (selector_norm and selector_norm in valid_selectors) or (text and text in valid_texts):
                 accepted.append(step)
             else:
                 print(
