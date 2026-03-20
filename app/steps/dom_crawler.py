@@ -2,6 +2,8 @@ from typing import List, Dict, Any
 
 from playwright.async_api import async_playwright
 
+from app.dom_schema import DomSnapshot
+
 
 async def _discover_routes(page, staging_url: str) -> List[str]:
     """
@@ -55,8 +57,8 @@ def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
 
 async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
     """
-    Collect structured UI elements: buttons (text + selector), links (text + href),
-    inputs (placeholder/name), and elements with data-testid. Max 20 per category.
+    Collect structured UI elements conforming to ButtonCandidate, LinkCandidate,
+    InputCandidate, and TestIdCandidate schemas. Max 20 per category.
     """
     try:
         print(f"[dom] collecting UI elements url={url}", flush=True)
@@ -112,21 +114,39 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
         }
 
         for meta in buttons[:MAX_ITEMS]:
+            # Emit full ButtonCandidate — all fields preserved so downstream consumers
+            # (script_generator, step_generator) can choose the best locator strategy
+            # without falling back to brittle raw CSS.
             out["buttons"].append({
-                "text": meta.get("text", ""),
+                "text":     meta.get("text", ""),
+                "testid":   meta.get("testid", ""),
+                "aria":     meta.get("aria", ""),
+                "title":    "",  # dom_crawler JS eval does not collect title; extractor does
+                "id":       meta.get("id", ""),
+                "role":     "button",
                 "selector": _short_selector(meta, "button"),
             })
 
         for meta in links[:MAX_ITEMS]:
+            # Emit full LinkCandidate — testid/aria/id preserved for prompt grounding.
             out["links"].append({
-                "text": meta.get("text", ""),
-                "href": meta.get("href", ""),
+                "text":   meta.get("text", ""),
+                "href":   meta.get("href", ""),
+                "testid": meta.get("testid", ""),
+                "aria":   meta.get("aria", ""),
+                "id":     meta.get("id", ""),
             })
 
         for meta in inputs[:MAX_ITEMS]:
+            # Emit full InputCandidate — JS key "type" mapped to "input_type" to avoid
+            # shadowing the Python builtin.
             out["inputs"].append({
                 "placeholder": meta.get("placeholder", ""),
-                "name": meta.get("name", ""),
+                "name":        meta.get("name", ""),
+                "input_type":  meta.get("type", ""),
+                "testid":      meta.get("testid", ""),
+                "aria":        meta.get("aria", ""),
+                "id":          meta.get("id", ""),
             })
 
         # Dedupe by testid, keep max 20
@@ -152,11 +172,11 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
         return {"buttons": [], "links": [], "inputs": [], "data_testids": []}
 
 
-async def crawl_dom_data(staging_url: str) -> Dict[str, Any]:
+async def crawl_dom_data(staging_url: str) -> DomSnapshot:
     """
-    Launch Playwright once; return structured UI data:
-      routes (internal <a href>), buttons (text + selector), links (text + href),
-      inputs (placeholder/name), data_testids. Max 20 per category.
+    Launch Playwright once; return a DomSnapshot of the home page:
+      routes (internal <a href>), buttons, links, inputs, data_testids.
+    Max 20 per category. current_path is always "/" (home).
     """
     try:
         async with async_playwright() as p:
@@ -170,6 +190,7 @@ async def crawl_dom_data(staging_url: str) -> Dict[str, Any]:
             await browser.close()
 
             return {
+                "current_path": "/",
                 "routes": routes or ["/"],
                 "buttons": ui.get("buttons") or [],
                 "links": ui.get("links") or [],
@@ -179,6 +200,7 @@ async def crawl_dom_data(staging_url: str) -> Dict[str, Any]:
     except Exception as e:
         print(f"[dom] crawl failed: {type(e).__name__}: {e}", flush=True)
         return {
+            "current_path": "/",
             "routes": ["/"],
             "buttons": [],
             "links": [],

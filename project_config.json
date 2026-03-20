@@ -4,5 +4,23 @@
   "preview_ready_timeout_seconds": 3,
   "preview_ready_poll_interval_seconds": 15,
   "deployment_delay_seconds": 1,
-  "auth": null
+  "auth": null,
+  "trigger": {
+    "mode": "auto",
+    "threshold": 5,
+    "commentCommand": "/glimpse",
+    "skipComment": true,
+    "include": ["src/", "app/"],
+    "exclude": [".test.", ".spec.", "/tests/", "/test/", "__tests__"]
+  },
+  "routeMap": {},
+  "appHints": "",
+  "capture": {
+    "viewport": {
+      "width": 1366,
+      "height": 900
+    },
+    "full_page_screenshots": true,
+    "full_page_debug_screenshots": true
+  }
 }

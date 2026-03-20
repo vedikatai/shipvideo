@@ -3,7 +3,7 @@ venv
 
 __pycache__/
 
-
+third_party/git-glimpse
 
 # Python
 __pycache__/
@@ -15,6 +15,12 @@ venv/
 env/
 app/*.png
 app/data/
+app/screenshots/shot*.png
+app/screenshots/out.mp4
+app/screenshots/debug/*.png
+app/screenshots/debug/*.json
+app/screenshots/step_1.png
+app/screenshots/video_tmp/4b29de01c430e5685527539d461ed694.webm
 
 
 shot1.png
@@ -22,3 +28,5 @@ app/shot2.png
 out.mp4
 # OS junk
 .DS_Store
+git-glimpse/
+S
