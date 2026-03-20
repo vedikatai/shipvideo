@@ -29,6 +29,7 @@ from app.steps.step_normalizer import (
     validate_steps,
     _extract_routes_from_diff,
 )
+from app.steps.diff_budget import budget_diff_files
 from app.config import load_config
 from observability import pipeline_step
 
@@ -37,8 +38,6 @@ try:
 except Exception:
     OpenAI = None  # type: ignore
     BadRequestError = Exception  # type: ignore
-
-MAX_DIFF_CHARS = 8000
 
 FALLBACK_STEPS: List[Dict[str, Any]] = [{"action": "screenshot"}]
 
@@ -290,10 +289,8 @@ async def generate_steps_from_diff(
             {"path": f["path"], "status": f["status"], "patch": f.get("patch", "")}
             for f in diff_files
         ]
-        diff_text = json.dumps(diffs_for_prompt, ensure_ascii=False)
-        if len(diff_text) > MAX_DIFF_CHARS:
-            diff_text = diff_text[:MAX_DIFF_CHARS]
-            print(f"[steps.step_generation] truncated diff to {MAX_DIFF_CHARS} chars", flush=True)
+        budgeted, _ = budget_diff_files(diffs_for_prompt)
+        diff_text = json.dumps(budgeted, ensure_ascii=False)
 
         if should_skip_llm_for_size(len(diff_text)):
             return {
