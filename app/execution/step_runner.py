@@ -75,7 +75,7 @@ def run_stepwise(
         while i < len(queue):
             step = queue[i]
 
-            ok, reason = validate_step_against_dom(step, dom_ctx)
+            ok, reason = validate_step_against_dom(step, dom_ctx, page=page)
             if not ok:
                 # regenerate immediately using fresh DOM
                 regenerated, attempts = regenerate_with_feedback(
@@ -83,6 +83,7 @@ def run_stepwise(
                     dom_context=dom_ctx,
                     error_context={"error": reason, "failed_step": step},
                     max_attempts=max_retries_per_failure,
+                    page=page,
                 )
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
                 if not regenerated:
@@ -99,6 +100,7 @@ def run_stepwise(
                     dom_context=dom_ctx,
                     error_context={"error": err or "execution_failed", "failed_step": step},
                     max_attempts=max_retries_per_failure,
+                    page=page,
                 )
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
                 if not regenerated:
@@ -120,6 +122,7 @@ def run_stepwise(
                     dom_context=dom_ctx,
                     error_context={"event": "navigation_boundary", "at_index": i},
                     max_attempts=max_retries_per_failure,
+                    page=page,
                 )
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
                 if regenerated:
