@@ -181,6 +181,7 @@ async def generate_steps_from_diff(
     staging_url: str,
     *,
     start_route: Optional[str] = None,
+    general_demo: bool = False,
 ) -> Dict[str, Any]:
     """
     Generates capture steps and narration from PR diff + live DOM using Azure OpenAI.
@@ -221,24 +222,28 @@ async def generate_steps_from_diff(
         route_map: Dict[str, Any] = config.get("routeMap") or {}
         app_hints: Any = config.get("appHints") or ""
 
-        mapped_routes: set[str] = set()
-        for f in diff_files:
-            fpath = f.get("path") or ""
-            for pattern, routes in route_map.items():
-                if not pattern:
-                    continue
-                if fnmatch.fnmatch(fpath, pattern):
-                    if isinstance(routes, str):
-                        if routes.strip():
-                            mapped_routes.add(routes.strip())
-                    elif isinstance(routes, list):
-                        for r in routes:
-                            if isinstance(r, str) and r.strip():
-                                mapped_routes.add(r.strip())
+        # When general_demo=True (triggered by a non-UI diff, e.g. config change),
+        # skip diff-based route mapping so we produce a homepage-only demo rather
+        # than trying to navigate to feature routes that aren't in the diff.
+        if not general_demo:
+            mapped_routes: set[str] = set()
+            for f in diff_files:
+                fpath = f.get("path") or ""
+                for pattern, routes in route_map.items():
+                    if not pattern:
+                        continue
+                    if fnmatch.fnmatch(fpath, pattern):
+                        if isinstance(routes, str):
+                            if routes.strip():
+                                mapped_routes.add(routes.strip())
+                        elif isinstance(routes, list):
+                            for r in routes:
+                                if isinstance(r, str) and r.strip():
+                                    mapped_routes.add(r.strip())
 
-        if mapped_routes:
-            dom_data["routes"] = list(set((dom_data.get("routes") or []) + list(mapped_routes)))
-            real_routes = dom_data["routes"]
+            if mapped_routes:
+                dom_data["routes"] = list(set((dom_data.get("routes") or []) + list(mapped_routes)))
+                real_routes = dom_data["routes"]
 
         # Normalize hints into a string for prompt injection.
         if isinstance(app_hints, dict):

@@ -22,6 +22,8 @@ from app.steps.step_execution import run_capture
 from app.steps.step_generation import generate_steps_from_diff
 from app.storage import upload_video
 from app.script_pipeline import ScriptPipelineError, run_script_pipeline
+from app.trigger import evaluate_trigger
+from app.config import load_config
 from observability import pipeline_step
 
 BASE_APP_DIR = Path(__file__).resolve().parent.parent
@@ -62,11 +64,30 @@ async def analyze_pr(
             }
 
         print(f"[steps.pipeline/analyze_pr] files_changed={len(diff_files)}", flush=True)
+
+        config = load_config()
+        decision = evaluate_trigger(diff_files, config)
+        print(
+            f"[steps.pipeline/analyze_pr] trigger should_run={decision.should_run} "
+            f"reason={decision.reason!r}",
+            flush=True,
+        )
+        if not decision.should_run:
+            return {
+                "skipped": True,
+                "reason": decision.reason,
+                "steps": [{"action": "screenshot"}],
+                "narration": "Demo generation skipped for this pull request.",
+                "llm_cost_usd": 0.0,
+                "generation_context": None,
+            }
+
         flow = await generate_steps_from_diff(
             diff_files,
             pr_title,
             staging_url,
             start_route=start_route,
+            general_demo=decision.general_demo,
         )
         steps = flow.get("steps") or [{"action": "screenshot"}]
         narration = flow.get("narration") or "Demo screenshot for this pull request."
