@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import Page, sync_playwright
 
+from app.config_types import CaptureSettings
 from app.context.dom_extractor import extract_dom_context
 from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
 from app.llm.retry_engine import regenerate_with_feedback
@@ -22,7 +23,15 @@ def _resolve_url(base: str, path: str) -> str:
     return base.rstrip("/") + "/" + path.lstrip("/")
 
 
-def _execute_one(page: Page, base_url: str, step: Dict[str, Any], out_dir: Path, shot_idx: int) -> tuple[bool, int, str | None]:
+def _execute_one(
+    page: Page,
+    base_url: str,
+    step: Dict[str, Any],
+    out_dir: Path,
+    shot_idx: int,
+    *,
+    full_page: bool = False,
+) -> tuple[bool, int, str | None]:
     action = step.get("action")
     if action == "goto":
         page.goto(_resolve_url(base_url, step.get("url") or "/"), wait_until="domcontentloaded", timeout=15000)
@@ -39,7 +48,7 @@ def _execute_one(page: Page, base_url: str, step: Dict[str, Any], out_dir: Path,
         return False, shot_idx, "missing_click_target"
     if action == "screenshot":
         path = out_dir / f"shot{shot_idx}.png"
-        page.screenshot(path=str(path), full_page=False)
+        page.screenshot(path=str(path), full_page=full_page)
         return True, shot_idx + 1, None
     return False, shot_idx, f"unknown_action:{action}"
 
@@ -51,11 +60,14 @@ def run_stepwise(
     objective: Dict[str, Any],
     screenshot_dir: Path,
     max_retries_per_failure: int = 3,
+    capture_settings: Optional[CaptureSettings] = None,
 ) -> Dict[str, Any]:
     """
     Step-by-step execution model:
       execute step -> detect navigation/major change -> re-anchor -> regenerate next steps from fresh DOM.
     """
+    cs = capture_settings or CaptureSettings()
+
     for old in screenshot_dir.glob("shot*.png"):
         old.unlink()
 
@@ -65,11 +77,10 @@ def run_stepwise(
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1366, "height": 900})
+        page = browser.new_page(viewport={"width": cs.viewport_width, "height": cs.viewport_height})
         page.goto(preview_url, wait_until="domcontentloaded", timeout=15000)
         wait_stable_after_navigation(page)
         dom_ctx = extract_dom_context(page)
-        state_before = capture_state(page)
 
         i = 0
         while i < len(queue):
@@ -93,7 +104,7 @@ def run_stepwise(
                 step = queue[i]
 
             prev = capture_state(page)
-            ok_exec, shot_idx, err = _execute_one(page, preview_url, step, screenshot_dir, shot_idx)
+            ok_exec, shot_idx, err = _execute_one(page, preview_url, step, screenshot_dir, shot_idx, full_page=cs.full_page_screenshots)
             if not ok_exec:
                 regenerated, attempts = regenerate_with_feedback(
                     objective=objective,

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
+
+from app.llm_guards import record_spend
+
+try:
+    from openai import OpenAI, BadRequestError  # type: ignore
+except Exception:
+    OpenAI = None  # type: ignore
+    BadRequestError = Exception  # type: ignore
 
 
 def _get_client() -> Any:
-    from openai import OpenAI  # type: ignore
-
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_API_KEY")
     if not endpoint or not key:
@@ -16,6 +22,62 @@ def _get_client() -> Any:
     if not base_url.endswith("openai/v1"):
         base_url = base_url + "/openai/v1/"
     return OpenAI(base_url=base_url, api_key=key)
+
+
+def _call_with_fallback(
+    client: Any,
+    deployment: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    schema: Dict[str, Any],
+) -> Tuple[Any, Dict[str, Any]]:
+    """
+    Call the Azure OpenAI deployment with json_schema mode; fall back to json_object
+    if the deployment does not support json_schema (older Azure versions raise BadRequestError).
+    Returns (completion, parsed_data).
+    """
+    try:
+        completion = client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=max_tokens,
+            response_format={"type": "json_schema", "json_schema": schema},
+        )
+        content = completion.choices[0].message.content or "{}"
+        print("[llm.step_generator] response_mode=json_schema", flush=True)
+        return completion, json.loads(content)
+    except BadRequestError as e:
+        print(
+            f"[llm.step_generator] json_schema unsupported ({type(e).__name__}); retrying json_object",
+            flush=True,
+        )
+    except Exception as e:
+        err_str = str(e).lower()
+        is_format_error = any(
+            kw in err_str
+            for kw in ("json_schema", "response_format", "unsupported", "invalid_request_error")
+        )
+        if not is_format_error:
+            raise
+        print(
+            f"[llm.step_generator] json_schema mode failed ({type(e).__name__}); retrying json_object",
+            flush=True,
+        )
+
+    completion = client.chat.completions.create(
+        model=deployment,
+        messages=messages,
+        temperature=0.2,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+    )
+    content = (completion.choices[0].message.content or "{}").strip()
+    start, end = content.find("{"), content.rfind("}")
+    if start != -1 and end > start:
+        content = content[start : end + 1]
+    print("[llm.step_generator] response_mode=json_object (fallback)", flush=True)
+    return completion, json.loads(content)
 
 
 def generate_next_steps(
@@ -106,14 +168,20 @@ def generate_next_steps(
         "data_testids": dom_context.get("data_testids", []),
         "previous_error": previous_error or {},
     }
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
     client = _get_client()
-    completion = client.chat.completions.create(
-        model=deployment,
-        messages=[{"role": "system", "content": system_msg}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-        temperature=0.2,
-        max_tokens=700,
-        response_format={"type": "json_schema", "json_schema": schema},
-    )
-    data = json.loads(completion.choices[0].message.content or "{}")
-    return data.get("steps") or []
+    completion, data = _call_with_fallback(client, deployment, messages, 700, schema)
+
+    usage = getattr(completion, "usage", None)
+    pt = getattr(usage, "prompt_tokens", 0) or 0
+    ct = getattr(usage, "completion_tokens", 0) or 0
+    record_spend(pt, ct)
+
+    steps = data.get("steps") or []
+    if not steps:
+        raise RuntimeError("generate_next_steps: LLM returned empty steps via both response_format modes")
+    return steps
 

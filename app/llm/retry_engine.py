@@ -27,12 +27,17 @@ def regenerate_with_feedback(
     previous_error = error_context
 
     for i in range(1, max_attempts + 1):
-        steps = generate_next_steps(
-            objective=objective,
-            dom_context=dom_context,
-            previous_error=previous_error,
-            max_steps=2,
-        )
+        try:
+            steps = generate_next_steps(
+                objective=objective,
+                dom_context=dom_context,
+                previous_error=previous_error,
+                max_steps=2,
+            )
+        except RuntimeError as e:
+            attempts.append({"attempt": i, "status": "generation_error", "error": str(e)})
+            previous_error = {"error": str(e)}
+            continue
         if not steps:
             attempts.append({"attempt": i, "status": "empty_steps"})
             previous_error = {"error": "LLM returned empty steps"}
