@@ -44,6 +44,14 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
     "schema": {
         "type": "object",
         "properties": {
+            "suggested_demo_flow": {
+                "type": "string",
+                "description": (
+                    "2–3 sentence natural language narrative of the ideal demo session "
+                    "(e.g. 'User navigates to billing, clicks Upgrade, sees confirmation modal'). "
+                    "Written BEFORE steps to act as the guiding narrative for script generation."
+                ),
+            },
             "steps": {
                 "type": "array",
                 "description": "Ordered UI interaction steps for the demo.",
@@ -77,7 +85,7 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
             },
             "narration": {"type": "string", "description": "1–2 sentence script narrating the demo."},
         },
-        "required": ["steps", "narration"],
+        "required": ["suggested_demo_flow", "steps", "narration"],
         "additionalProperties": False,
     },
 }
@@ -142,6 +150,28 @@ def _fallback_narration(pr_title: Optional[str]) -> str:
     if pr_title:
         return f"Demo screenshot for pull request: {pr_title}."
     return "Demo screenshot for this pull request."
+
+
+def _ensure_screenshots_for_visited_pages(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensure the flow captures evidence after each visited/interaction state.
+
+    Rule:
+    - After every `goto` or `click`, ensure a `screenshot` step follows immediately
+      unless one already exists as the next action.
+    """
+    out: List[Dict[str, Any]] = []
+    for i, step in enumerate(steps):
+        out.append(step)
+        action = step.get("action")
+        if action not in {"goto", "click"}:
+            continue
+        next_action = (steps[i + 1].get("action") if i + 1 < len(steps) and isinstance(steps[i + 1], dict) else None)
+        if next_action == "screenshot":
+            continue
+        auto_label = "Auto-captured state after navigation" if action == "goto" else "Auto-captured state after interaction"
+        out.append({"action": "screenshot", "label": auto_label})
+    return out
 
 
 @pipeline_step("step_generation")
@@ -246,6 +276,12 @@ async def generate_steps_from_diff(
             "You are a demo-flow generator for pull requests.\n"
             "Given a PR diff and a live DOM snapshot of the staging preview, "
             "produce a short UI walkthrough that showcases the changed functionality.\n\n"
+            "Output order matters:\n"
+            "1. FIRST write `suggested_demo_flow`: a 2–3 sentence natural language narrative "
+            "describing what the ideal demo session looks like (e.g. 'User opens the billing page, "
+            "clicks Upgrade, and sees the confirmation modal'). This narrative guides script generation.\n"
+            "2. THEN generate `steps` following the narrative.\n"
+            "3. THEN write `narration`.\n\n"
             "Rules:\n"
             "• Use ONLY routes from real_routes for goto actions.\n"
             "• For click actions use ONLY selectors from real_buttons or data_testids "
@@ -338,14 +374,21 @@ async def generate_steps_from_diff(
         normalized = normalize_steps(validated)
         if not normalized:
             normalized = FALLBACK_STEPS
+        normalized = _ensure_screenshots_for_visited_pages(normalized)
 
         narration = data.get("narration") or fallback_narration
-        print(f"[steps.step_generation] steps_generated={len(normalized)}", flush=True)
+        suggested_demo_flow = (data.get("suggested_demo_flow") or "").strip()
+        print(
+            f"[steps.step_generation] steps_generated={len(normalized)} "
+            f"suggested_demo_flow_chars={len(suggested_demo_flow)}",
+            flush=True,
+        )
         return {
             "steps": normalized,
             "narration": narration,
+            "suggested_demo_flow": suggested_demo_flow,
             "llm_cost_usd": llm_cost_usd,
-            # Context needed for self-healing retries during execution.
+            # Context passed to both stepwise execution and script-first pipeline.
             "generation_context": {
                 "dom_data": dom_data,
                 "diffs_for_prompt": diffs_for_prompt,
@@ -355,6 +398,8 @@ async def generate_steps_from_diff(
                 "real_inputs": real_inputs,
                 "data_testids": real_data_testids,
                 "start_route": start_route,
+                "suggested_demo_flow": suggested_demo_flow,
+                "app_hints": app_hints_text,
             },
         }
 

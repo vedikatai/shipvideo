@@ -19,6 +19,8 @@ app/screenshots/shot*.png
 app/screenshots/out.mp4
 app/screenshots/debug/*.png
 app/screenshots/debug/*.json
+app/screenshots/step_1.png
+app/screenshots/video_tmp/4b29de01c430e5685527539d461ed694.webm
 
 
 shot1.png

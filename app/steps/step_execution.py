@@ -13,6 +13,7 @@ This module is intentionally verbose in structured logging to make debugging rel
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,7 @@ from playwright.sync_api import Page, sync_playwright, TimeoutError as Playwrigh
 
 from observability import pipeline_step
 from app.config import load_config
+from app.execution.step_runner import run_stepwise
 
 BASE_APP_DIR = Path(__file__).resolve().parent.parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
@@ -99,6 +101,57 @@ def _safe_json_dumps(obj: Any) -> str:
 
 def _capture_page_screenshot(page: Page, path: Path, *, full_page: bool) -> None:
     page.screenshot(path=str(path), full_page=full_page)
+
+
+def _short_error_message(err_msg: str, max_chars: int = 240) -> str:
+    msg = (err_msg or "").replace("\n", " ").strip()
+    if len(msg) <= max_chars:
+        return msg
+    return msg[:max_chars] + "..."
+
+
+def _compact_runtime_dom_context(runtime_dom_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Keep retry payload small and high-signal for LLM repair.
+    """
+    ctx = runtime_dom_context or {}
+    buttons = ctx.get("buttons") or []
+    links = ctx.get("links") or []
+    testids = ctx.get("data_testids") or []
+    # Keep top-N meaningful entries only.
+    compact_buttons = []
+    for b in buttons[:12]:
+        compact_buttons.append(
+            {
+                "text": (b.get("text") or "").strip()[:80],
+                "testid": (b.get("testid") or "").strip(),
+                "aria": (b.get("aria") or "").strip()[:80],
+                "id": (b.get("id") or "").strip(),
+            }
+        )
+    compact_links = []
+    for l in links[:12]:
+        compact_links.append(
+            {
+                "text": (l.get("text") or "").strip()[:80],
+                "href": (l.get("href") or "").strip(),
+            }
+        )
+    compact_tids = []
+    for t in testids[:20]:
+        compact_tids.append(
+            {
+                "testid": (t.get("testid") or "").strip(),
+                "tag": (t.get("tag") or "").strip(),
+                "text": (t.get("text") or "").strip()[:60],
+            }
+        )
+    return {
+        "current_path": (ctx.get("current_path") or "/").strip() or "/",
+        "buttons": compact_buttons,
+        "links": compact_links,
+        "data_testids": compact_tids,
+    }
 
 
 def _wait_dom_ready(page: Page, timeout_ms: int) -> None:
@@ -557,6 +610,7 @@ def _replace_failing_step_with_llm(
     diff_files_for_prompt: List[Dict[str, str]],
     dom_data: Dict[str, Any],
     runtime_dom_context: Optional[Dict[str, Any]],
+    retry_history: Optional[List[Dict[str, Any]]],
     max_tokens: int,
     max_replacement_steps: int = 2,
 ) -> List[Dict[str, Any]]:
@@ -564,10 +618,11 @@ def _replace_failing_step_with_llm(
     Ask the LLM to output ONLY replacement steps for the failing step index.
     """
     diffs_for_prompt = diff_files_for_prompt
-    runtime_path = (runtime_dom_context or {}).get("current_path") or "/"
-    runtime_buttons = (runtime_dom_context or {}).get("buttons") or []
-    runtime_links = (runtime_dom_context or {}).get("links") or []
-    runtime_testids = (runtime_dom_context or {}).get("data_testids") or []
+    compact_runtime_ctx = _compact_runtime_dom_context(runtime_dom_context)
+    runtime_path = compact_runtime_ctx.get("current_path") or "/"
+    runtime_buttons = compact_runtime_ctx.get("buttons") or []
+    runtime_links = compact_runtime_ctx.get("links") or []
+    runtime_testids = compact_runtime_ctx.get("data_testids") or []
 
     real_routes = (
         generation_context.get("real_routes")
@@ -601,7 +656,8 @@ def _replace_failing_step_with_llm(
         "failing_step_index": failing_step_index,
         "failing_step": failing_step,
         "error_context": error_context,
-        "runtime_dom_context": runtime_dom_context or {},
+        "runtime_dom_context": compact_runtime_ctx,
+        "retry_history": retry_history or [],
         "real_routes": real_routes,
         "real_buttons": real_buttons,
         "real_links": real_links,
@@ -650,6 +706,35 @@ def run_capture(
     steps = steps or DEFAULT_STEPS
     out_dir = screenshot_dir or SCREENSHOT_DIR
     capture_settings = _load_capture_settings()
+
+    # New mandatory execution model: step-by-step with navigation boundary
+    # detection + re-anchoring after major DOM changes.
+    objective = {
+        "goal": "Generate reliable demo actions from current DOM only",
+        "generation_context": generation_context or {},
+    }
+    stepwise = run_stepwise(
+        preview_url=preview_url,
+        initial_steps=steps,
+        objective=objective,
+        screenshot_dir=out_dir,
+        max_retries_per_failure=MAX_STEP_RETRIES,
+    )
+    if stepwise.get("success"):
+        return {
+            "steps_succeeded": int(stepwise.get("steps_succeeded", 0)),
+            "steps_failed": int(stepwise.get("steps_failed", 0)),
+            "failure_reason": None,
+            "success": True,
+            "debug": {"engine": "stepwise", "results": stepwise.get("results", [])},
+        }
+    return {
+        "steps_succeeded": 0,
+        "steps_failed": 1,
+        "failure_reason": stepwise.get("failure_reason") or "stepwise_execution_failed",
+        "success": False,
+        "debug": {"engine": "stepwise", "results": stepwise.get("results", [])},
+    }
 
     for old_shot in out_dir.glob("shot*.png"):
         old_shot.unlink()
@@ -799,7 +884,9 @@ def run_capture(
                     last_failure_reason = err_msg
                     attempt_ctx["error"] = err_msg
                     dom_snapshot = _capture_dom_snapshot(page)
-                    attempt_ctx["dom_snapshot_trimmed"] = dom_snapshot
+                    dom_hash = hashlib.sha256(dom_snapshot.encode("utf-8", errors="ignore")).hexdigest()[:12]
+                    attempt_ctx["dom_snapshot_hash"] = dom_hash
+                    attempt_ctx["dom_snapshot_chars"] = len(dom_snapshot)
                     screenshot_path = DEBUG_DIR / f"step{i}_attempt{attempt}_failure.png"
                     try:
                         _capture_page_screenshot(
@@ -821,12 +908,23 @@ def run_capture(
                         if not generation_context:
                             raise RuntimeError("LLM retry requires generation_context but it was not provided")
 
+                        compact_retry_history: List[Dict[str, Any]] = []
+                        for a in step_debug.get("attempts", []):
+                            compact_retry_history.append(
+                                {
+                                    "attempt": a.get("attempt"),
+                                    "error": _short_error_message(str(a.get("error") or "")),
+                                    "visual_fallback": a.get("visual_fallback"),
+                                }
+                            )
+
                         error_context = {
                             "failed_step_index": i,
                             "failed_step": step,
-                            "error_message": err_msg,
+                            "error_message": _short_error_message(err_msg),
                             "selector_used": (step.get("selector") or "").strip() or (step.get("text") or "").strip(),
-                            "dom_snapshot_trimmed": dom_snapshot,
+                            "dom_snapshot_hash": dom_hash,
+                            "dom_snapshot_preview": _trim_text(dom_snapshot, 1200),
                             "failure_screenshot_path": str(attempt_ctx.get("failure_screenshot") or ""),
                         }
 
@@ -845,6 +943,7 @@ def run_capture(
                                 ),
                                 encoding="utf-8",
                             )
+                            attempt_ctx["trace_file"] = trace_path.name
                         except Exception:
                             pass
 
@@ -862,6 +961,7 @@ def run_capture(
                             diff_files_for_prompt=generation_context.get("diffs_for_prompt") or [],
                             dom_data=generation_context.get("dom_data") or {},
                             runtime_dom_context=_collect_runtime_dom_context(page),
+                            retry_history=compact_retry_history,
                             max_tokens=800,
                         )
 
@@ -879,9 +979,21 @@ def run_capture(
                     step_debug["attempts"].append(attempt_ctx)
                     step_results.append(False)
                     debug["steps"].append(step_debug)
+                    attempt_summaries = []
+                    for a in step_debug.get("attempts", []):
+                        attempt_summaries.append(
+                            {
+                                "attempt": a.get("attempt"),
+                                "error": a.get("error"),
+                                "visual_fallback": a.get("visual_fallback"),
+                                "failure_screenshot": a.get("failure_screenshot"),
+                                "trace_file": a.get("trace_file"),
+                                "dom_snapshot_hash": a.get("dom_snapshot_hash"),
+                            }
+                        )
                     raise RuntimeError(
                         f"Unrecoverable step failure at index={i}, action={action}. "
-                        f"Debug: {json.dumps(step_debug, ensure_ascii=False)[:8000]}"
+                        f"attempts={json.dumps(attempt_summaries, ensure_ascii=False)}"
                     )
 
             if step_ok:
