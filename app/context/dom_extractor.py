@@ -4,10 +4,17 @@ from typing import Any, Dict, List
 
 from playwright.sync_api import Page
 
+from app.dom_schema import DomSnapshot
 
-def extract_dom_context(page: Page, *, max_items: int = 40) -> Dict[str, Any]:
+
+def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
     """
     Extract fresh, interaction-focused DOM context from the CURRENT page.
+
+    Returns a DomSnapshot. All button dicts conform to ButtonCandidate:
+      - `aria`  holds aria-label only (use for [aria-label='x'] selectors).
+      - `title` holds title attribute only (display-only, not for selectors).
+      - `selector` is "" — runtime extractor does not precompute CSS selectors.
     """
     current_path = page.evaluate("() => window.location.pathname || '/'")
 
@@ -17,19 +24,20 @@ def extract_dom_context(page: Page, *, max_items: int = 40) -> Dict[str, Any]:
             role: (e.getAttribute('role') || (e.tagName || '').toLowerCase()).toLowerCase(),
             text: (e.innerText || e.value || "").trim().slice(0, 100),
             testid: e.getAttribute('data-testid') || "",
-            label: e.getAttribute('aria-label') || e.getAttribute('title') || "",
-            id: e.id || ""
+            aria: e.getAttribute('aria-label') || "",
+            title: e.getAttribute('title') || "",
+            id: e.id || "",
+            selector: ""
         }}))""",
     ) or []
 
     links = page.eval_on_selector_all(
         "a[href]",
         f"""els => els.slice(0, {max_items}).map(e => ({{
-            role: "link",
             text: (e.innerText || "").trim().slice(0, 100),
             href: e.getAttribute('href') || "",
             testid: e.getAttribute('data-testid') || "",
-            label: e.getAttribute('aria-label') || "",
+            aria: e.getAttribute('aria-label') || "",
             id: e.id || ""
         }}))""",
     ) or []
@@ -70,6 +78,7 @@ def extract_dom_context(page: Page, *, max_items: int = 40) -> Dict[str, Any]:
         "routes": sorted(routes),
         "buttons": buttons,
         "links": links,
+        "inputs": [],  # runtime extractor does not query inputs; crawler covers this
         "data_testids": dedup_tids,
     }
 

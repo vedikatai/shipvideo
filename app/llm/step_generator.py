@@ -67,9 +67,9 @@ def generate_next_steps(
     # Build a compact, human-readable action menu from the live DOM so the model
     # has a concrete list to pick from rather than guessing.
     available_buttons = [
-        {"text": (b.get("text") or "").strip(), "testid": (b.get("testid") or "").strip(), "aria": (b.get("label") or b.get("aria") or "").strip(), "id": (b.get("id") or "").strip()}
+        {"text": (b.get("text") or "").strip(), "testid": (b.get("testid") or "").strip(), "aria": (b.get("aria") or "").strip(), "id": (b.get("id") or "").strip()}
         for b in (dom_context.get("buttons") or [])
-        if (b.get("text") or b.get("testid") or b.get("label") or b.get("aria") or "").strip()
+        if (b.get("text") or b.get("testid") or b.get("aria") or "").strip()
     ][:15]
     available_links = [
         {"text": (l.get("text") or "").strip(), "href": (l.get("href") or "").strip()}
@@ -83,8 +83,8 @@ def generate_next_steps(
         "── HOW TO TARGET ELEMENTS (follow this decision tree exactly) ──\n"
         "1. If the button/element has a data-testid listed in dom_context.data_testids:\n"
         "   → set selector=\"[data-testid='the-testid']\"  AND  text=\"\"\n"
-        "2. If the button/element has an aria-label listed in dom_context.buttons[].label:\n"
-        "   → set selector=\"[aria-label='the-label']\"  AND  text=\"\"\n"
+        "2. If the button/element has an aria-label listed in dom_context.buttons[].aria:\n"
+        "   → set selector=\"[aria-label='the-aria']\"  AND  text=\"\"\n"
         "3. For EVERYTHING ELSE (including role-based targeting):\n"
         "   → set selector=\"\"  AND  text=\"exact visible button/link text from dom_context\"\n"
         "   The text MUST appear verbatim in dom_context.available_buttons[].text or available_links[].text.\n\n"

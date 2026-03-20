@@ -115,7 +115,7 @@ def _build_action_menu(dom_data: Dict[str, Any]) -> Dict[str, Any]:
     for b in (dom_data.get("buttons") or [])[:20]:
         entry: Dict[str, str] = {}
         testid = (b.get("testid") or "").strip()
-        aria = (b.get("label") or b.get("aria") or "").strip()
+        aria = (b.get("aria") or "").strip()
         text = (b.get("text") or "").strip()
         selector_val = (b.get("selector") or "").strip()
 
