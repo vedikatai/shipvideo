@@ -75,8 +75,7 @@ def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> s
         completion = client.chat.completions.create(
             model=deployment,
             messages=messages,
-            temperature=0.2,
-            max_tokens=1500,
+            max_completion_tokens=1500,
             response_format={"type": "json_schema", "json_schema": _SCRIPT_JSON_SCHEMA},
         )
         data = json.loads(completion.choices[0].message.content or "{}")
@@ -94,8 +93,7 @@ def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> s
     completion = client.chat.completions.create(
         model=deployment,
         messages=messages,
-        temperature=0.2,
-        max_tokens=1500,
+        max_completion_tokens=1500,
         response_format={"type": "json_object"},
     )
     content = (completion.choices[0].message.content or "{}").strip()

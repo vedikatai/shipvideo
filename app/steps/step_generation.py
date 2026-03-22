@@ -19,7 +19,7 @@ from app.steps.dom_crawler import crawl_dom_data
 from app.llm_guards import (
     check_budget,
     estimate_run_cost,
-    get_max_tokens,
+    get_max_completion_tokens,
     record_spend,
     should_skip_llm_for_size,
 )
@@ -99,7 +99,7 @@ def _call_llm(
     client: Any,
     model: str,
     messages: List[Dict[str, str]],
-    max_tokens: int,
+    max_completion_tokens: int,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
     Call Azure OpenAI with structured output.
@@ -111,8 +111,7 @@ def _call_llm(
         completion = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.2,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             response_format={"type": "json_schema", "json_schema": _DEMO_FLOW_JSON_SCHEMA},
         )
         content = completion.choices[0].message.content or "{}"
@@ -138,8 +137,7 @@ def _call_llm(
     completion = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.2,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_completion_tokens,
         response_format={"type": "json_object"},
     )
     content = (completion.choices[0].message.content or "{}").strip()
@@ -358,7 +356,7 @@ async def generate_steps_from_diff(
             client,
             azure_deployment,
             messages,
-            get_max_tokens(),
+            get_max_completion_tokens(),
         )
 
         usage = getattr(completion, "usage", None)

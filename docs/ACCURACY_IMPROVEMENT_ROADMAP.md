@@ -714,7 +714,7 @@ This phase brings `generate_next_steps()` to full parity with `_call_llm` and al
 1. **Extract `_call_with_fallback` helper** in `step_generator.py` (mirrors the existing pattern in `step_generation.py`):
 
    ```python
-   def _call_with_fallback(client, deployment: str, messages, max_tokens: int, schema: dict) -> dict:
+   def _call_with_fallback(client, deployment: str, messages, max_completion_tokens: int, schema: dict) -> dict:
        try:
            from openai import BadRequestError  # type: ignore
        except ImportError:
@@ -725,7 +725,7 @@ This phase brings `generate_next_steps()` to full parity with `_call_llm` and al
                model=deployment,
                messages=messages,
                temperature=0.2,
-               max_tokens=max_tokens,
+               max_completion_tokens=max_completion_tokens,
                response_format={"type": "json_schema", "json_schema": schema},
            )
            return completion, json.loads(completion.choices[0].message.content or "{}")
@@ -741,7 +741,7 @@ This phase brings `generate_next_steps()` to full parity with `_call_llm` and al
            model=deployment,
            messages=messages,
            temperature=0.2,
-           max_tokens=max_tokens,
+           max_completion_tokens=max_completion_tokens,
            response_format={"type": "json_object"},
        )
        content = (completion.choices[0].message.content or "{}").strip()
@@ -1278,7 +1278,7 @@ def test_src_app_scores_primary():
 The function signature in Phase 6 is declared as:
 
 ```python
-def _call_with_fallback(client, deployment: str, messages, max_tokens: int, schema: dict) -> dict:
+def _call_with_fallback(client, deployment: str, messages, max_completion_tokens: int, schema: dict) -> dict:
 ```
 
 But the function returns a **tuple** `(completion, parsed_dict)`, not a bare dict. The call site in Phase 6 Task 3 also destructures it correctly with `completion, data = _call_with_fallback(...)`.

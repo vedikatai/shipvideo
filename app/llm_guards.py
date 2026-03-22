@@ -1,7 +1,7 @@
 """
 LLM cost and safety guards. Change limits and behavior here without touching pipeline logic.
 
-- max_tokens: cap Azure response size
+- max_completion_tokens: cap Azure response size
 - budget: pause LLM spend above a dollar limit (internal tracking, or from Azure Cost Management)
 - dedupe: skip re-running for the same PR+commit (redeliveries)
 - skip_llm_for_size: skip LLM when diff payload is too large (use fallback steps)
@@ -234,7 +234,7 @@ def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def get_max_tokens() -> int:
+def get_max_completion_tokens() -> int:
     """Max tokens to allow for Azure chat completion response."""
     return MAX_RESPONSE_TOKENS
 

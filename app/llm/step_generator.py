@@ -28,7 +28,7 @@ def _call_with_fallback(
     client: Any,
     deployment: str,
     messages: List[Dict[str, str]],
-    max_tokens: int,
+    max_completion_tokens: int,
     schema: Dict[str, Any],
 ) -> Tuple[Any, Dict[str, Any]]:
     """
@@ -40,8 +40,7 @@ def _call_with_fallback(
         completion = client.chat.completions.create(
             model=deployment,
             messages=messages,
-            temperature=0.2,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_completion_tokens,
             response_format={"type": "json_schema", "json_schema": schema},
         )
         content = completion.choices[0].message.content or "{}"
@@ -68,8 +67,7 @@ def _call_with_fallback(
     completion = client.chat.completions.create(
         model=deployment,
         messages=messages,
-        temperature=0.2,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_completion_tokens,
         response_format={"type": "json_object"},
     )
     content = (completion.choices[0].message.content or "{}").strip()
