@@ -91,6 +91,7 @@ def main() -> None:
                 data_dir = REPO_ROOT / "data"
                 data_dir.mkdir(parents=True, exist_ok=True)
                 summary_path = data_dir / "pipeline_run_summary.json"
+                _dbg = capture_summary.get("debug") or {}
                 run_summary = {
                     "pr_number": args.pr_number,
                     "steps_generated": len(steps),
@@ -100,6 +101,17 @@ def main() -> None:
                     "success": capture_summary.get("success"),
                     "cost_usd": round(flow.get("llm_cost_usd", 0.0) or 0.0, 4),
                     "video_url": video_url,
+                    "video_pipeline": {
+                        "pipeline": capture_summary.get("pipeline"),
+                        "pipeline_branch": capture_summary.get("pipeline_branch"),
+                        "capture_browser": capture_summary.get("capture_browser"),
+                        "capture_path": capture_summary.get("capture_path"),
+                        "agent_browser_used": bool(
+                            capture_summary.get("agent_browser_used", False)
+                        ),
+                        "stepwise_engine": _dbg.get("engine"),
+                        "stepwise_mode": capture_summary.get("mode"),
+                    },
                 }
                 with open(summary_path, "w") as f:
                     json.dump(run_summary, f, indent=2)

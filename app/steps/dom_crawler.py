@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
-from app.dom_schema import DomSnapshot
+from app.dom_schema import AgentBrowserSnapshot, DomSnapshot
 
 
 # ---------------------------------------------------------------------------
@@ -471,3 +471,76 @@ async def crawl_dom_data(
             "data_testids":    [],
             "route_snapshots": {},
         }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Agent Browser-backed targeted route crawl
+# ---------------------------------------------------------------------------
+
+def crawl_ab_routes(
+    base_url: str,
+    routes: List[str],
+    *,
+    session: str = "ab_crawl",
+) -> Dict[str, AgentBrowserSnapshot]:
+    """
+    Agent Browser-backed targeted route crawl for experiment accuracy validation.
+
+    Visits each route in routes using AgentBrowserCLI and returns a mapping
+    route_path → AgentBrowserSnapshot.  Used in Phase 4 to validate route-aware
+    accuracy alongside the Playwright crawl_dom_data() path.
+
+    Unlike crawl_dom_data() (which performs BFS discovery and DOM extraction),
+    this function only visits the explicitly-provided routes and returns
+    normalized AgentBrowserSnapshot objects ready for use with ref_selector.
+
+    The snapshots can be merged into a comparison-ready structure using
+    app.context.dom_extractor.merge_ab_route_snapshots().
+
+    Args:
+        base_url — base URL of the deployment (e.g. "https://preview.example.com").
+        routes   — list of relative route paths to visit (e.g. ["/", "/settings"]).
+        session  — agent-browser session name for isolation.
+
+    Returns:
+        Dict mapping each successfully-crawled route path to its
+        AgentBrowserSnapshot.  Routes that failed (CLI error, timeout) are
+        omitted from the result — failures are logged but never raise.
+    """
+    # Local import: keeps the synchronous Playwright crawl path independent
+    # of the browser sub-package at module load time.
+    from app.browser.agent_browser_cli import AgentBrowserCLI, AgentBrowserError
+
+    results: Dict[str, AgentBrowserSnapshot] = {}
+    cli = AgentBrowserCLI(session=session)
+
+    try:
+        for route in routes:
+            full_url = base_url.rstrip("/") + route
+            t0 = time.monotonic()
+            try:
+                print(f"[ab_crawl] crawling route={route!r} url={full_url}", flush=True)
+                cli.open(full_url)
+                snap = cli.snapshot()
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                results[route] = snap
+                print(
+                    f"[ab_crawl] route={route!r} "
+                    f"elements={len(snap['interactive_elements'])} "
+                    f"elapsed_ms={elapsed_ms}",
+                    flush=True,
+                )
+            except AgentBrowserError as exc:
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                print(
+                    f"[ab_crawl] route_failed route={route!r} "
+                    f"elapsed_ms={elapsed_ms}: {exc}",
+                    flush=True,
+                )
+    finally:
+        try:
+            cli.close()
+        except Exception:
+            pass
+
+    return results

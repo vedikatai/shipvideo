@@ -1,16 +1,18 @@
 """
 Pipeline: orchestrates PR analysis (extraction + step generation) and video pipeline.
 
-Execution strategy (dual-pipeline):
-  1. Script-first (preferred): LLM generates a full Playwright script → continuous webm → mp4.
-     Produces smooth, real screen-recording quality video.
-  2. Stepwise (fallback): step-by-step execution with self-healing retries → screenshots → mp4.
-     More resilient when the script-first pipeline cannot recover from LLM errors.
+Execution strategy:
+  - Default: **stepwise only** — `run_capture` (Agent Browser CLI by default, see
+    `app.steps.step_execution`). Screenshots → mp4.
+  - Optional script-first: set env `VIDEO_PIPELINE=script_first` to try the legacy
+    Playwright script path first (smooth continuous recording), then fall back to
+    stepwise on failure.
 
 Call analyze_pr() for steps + narration; call run_pipeline() for full capture → render → upload.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import json
 from pathlib import Path
@@ -126,12 +128,11 @@ def run_pipeline(
     upload: bool = True,
 ) -> tuple:
     """
-    Dual-pipeline runner: tries script-first for smooth continuous video,
-    falls back to stepwise (screenshot-stitch) on failure.
+    Video capture runner. By default (**VIDEO_PIPELINE** unset or `stepwise`) only
+    the stepwise path runs (Agent Browser unless `BROWSER_BACKEND=playwright`).
 
-    Pipeline selection logic:
-      - script-first: requires suggested_demo_flow in generation_context.
-      - stepwise: always available as fallback.
+    Set **VIDEO_PIPELINE=script_first** to attempt script-first first when
+    `suggested_demo_flow` is present, then fall back to stepwise.
 
     Returns:
         tuple: (video_url: str, capture_summary: dict)
@@ -141,19 +142,26 @@ def run_pipeline(
 
     import traceback as _tb
 
-    print("\n[steps.pipeline] === VIDEO PIPELINE (script-first → stepwise fallback) ===", flush=True)
+    _video_pipeline = os.getenv("VIDEO_PIPELINE", "stepwise").strip().lower()
+    use_script_first = _video_pipeline == "script_first"
+
+    print(
+        "\n[steps.pipeline] === VIDEO PIPELINE "
+        f"(mode={_video_pipeline!r}; default=stepwise / Agent Browser) ===",
+        flush=True,
+    )
 
     video_path: Optional[Path] = None
     capture_summary: Dict[str, Any] = {}
     pipeline_used = "unknown"
 
-    # ── Script-first attempt ────────────────────────────────────────────────
+    # ── Script-first (opt-in only) ───────────────────────────────────────────
     has_demo_flow = bool(
         generation_context
         and (generation_context.get("suggested_demo_flow") or "").strip()
     )
 
-    if has_demo_flow:
+    if use_script_first and has_demo_flow:
         print("[steps.pipeline] trying script-first pipeline", flush=True)
         try:
             result = run_script_pipeline(
@@ -166,6 +174,11 @@ def run_pipeline(
             pipeline_used = "script"
             capture_summary = {
                 "pipeline": "script",
+                "pipeline_branch": "script_first",
+                # Script-first uses Playwright via app.recorder.playwright_runner (not stepwise / not Agent Browser).
+                "capture_browser": "playwright",
+                "capture_path": "script_first_playwright",
+                "agent_browser_used": False,
                 "attempts": result["attempts"],
                 "steps_succeeded": 1,
                 "steps_failed": 0,
@@ -188,9 +201,15 @@ def run_pipeline(
                 flush=True,
             )
             _tb.print_exc()
+    elif use_script_first and not has_demo_flow:
+        print(
+            "[steps.pipeline] VIDEO_PIPELINE=script_first but no suggested_demo_flow "
+            "— using stepwise directly",
+            flush=True,
+        )
     else:
         print(
-            "[steps.pipeline] no suggested_demo_flow — skipping script-first, using stepwise directly",
+            "[steps.pipeline] VIDEO_PIPELINE=stepwise — skipping script-first, using stepwise only",
             flush=True,
         )
 
@@ -216,6 +235,13 @@ def run_pipeline(
             video_path = SCREENSHOT_DIR / "out.mp4"
             pipeline_used = "stepwise"
             capture_summary["pipeline"] = "stepwise"
+            capture_summary["pipeline_branch"] = "stepwise"
+            capture_summary["capture_path"] = "stepwise"
+            # run_capture already sets backend, mode, debug.engine, etc.
+            capture_summary["capture_browser"] = capture_summary.get("backend") or "playwright"
+            capture_summary["agent_browser_used"] = (
+                capture_summary.get("backend") == "agent_browser_cli"
+            )
         except subprocess.CalledProcessError as e:
             print(
                 f"[steps.pipeline/stepwise] subprocess failed returncode={e.returncode}",
@@ -239,6 +265,14 @@ def run_pipeline(
         raise FileNotFoundError(f"Video file not found after {pipeline_used} pipeline: {video_path}")
 
     print(f"[steps.pipeline] pipeline_used={pipeline_used} video={video_path}", flush=True)
+    _vp = capture_summary.get("pipeline_branch", pipeline_used)
+    _cb = capture_summary.get("capture_browser", "unknown")
+    _ab = capture_summary.get("agent_browser_used", False)
+    print(
+        f"[steps.pipeline] capture_summary: pipeline_branch={_vp!r} "
+        f"capture_browser={_cb!r} agent_browser={_ab}",
+        flush=True,
+    )
 
     if upload:
         video_url = upload_video(video_path, pr_number=pr_number)
