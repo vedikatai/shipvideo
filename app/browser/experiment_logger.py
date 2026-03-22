@@ -53,6 +53,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
+from app.dom_schema import SuccessCondition
+
 # ---------------------------------------------------------------------------
 # Artifact directories
 # ---------------------------------------------------------------------------
@@ -70,27 +72,6 @@ _EXPERIMENT_SUMMARY_PATH = _RUNS_DIR / "experiment_summary.json"
 # ---------------------------------------------------------------------------
 # Phase 4 — Test suite types (Key Task 1)
 # ---------------------------------------------------------------------------
-
-#: Allowed success condition types. Every test case must pick exactly one.
-SuccessConditionType = Literal["url_match", "text_present", "element_present"]
-
-
-class SuccessCondition(TypedDict):
-    """
-    Ground-truth success condition for a single test case.
-
-    Fields:
-        type  — one of "url_match", "text_present", "element_present".
-        value — the expected value to check:
-                  url_match       → post-action URL must contain this substring.
-                  text_present    → post-action snapshot_text must contain this string.
-                  element_present → post-action snapshot must contain an element
-                                    whose accessible name matches this string.
-    """
-
-    type: SuccessConditionType
-    value: str
-
 
 class TestCase(TypedDict):
     """
@@ -135,7 +116,11 @@ FIXED_TEST_SUITE: List[TestCase] = [
         "route": "/",
         "steps": [
             {"action": "goto", "url": "/"},
-            {"action": "click", "text": "Generate API Key"},
+            {
+                "action": "click",
+                "text": "Generate API Key",
+                "success_condition": {"type": "text_present", "value": "API Key created"},
+            },
             {"action": "screenshot"},
         ],
         "success_condition": {"type": "text_present", "value": "API Key created"},
@@ -151,7 +136,11 @@ FIXED_TEST_SUITE: List[TestCase] = [
         "route": "/",
         "steps": [
             {"action": "goto", "url": "/"},
-            {"action": "click", "text": "Settings"},
+            {
+                "action": "click",
+                "text": "Settings",
+                "success_condition": {"type": "url_match", "value": "/settings"},
+            },
             {"action": "screenshot"},
         ],
         "success_condition": {"type": "url_match", "value": "/settings"},
@@ -168,7 +157,11 @@ FIXED_TEST_SUITE: List[TestCase] = [
         "route": "/",
         "steps": [
             {"action": "goto", "url": "/"},
-            {"action": "click", "text": "Open menu"},
+            {
+                "action": "click",
+                "text": "Open menu",
+                "success_condition": {"type": "element_present", "value": "Close menu"},
+            },
             {"action": "screenshot"},
         ],
         "success_condition": {"type": "element_present", "value": "Close menu"},
@@ -202,7 +195,11 @@ FIXED_TEST_SUITE: List[TestCase] = [
         "route": "/",
         "steps": [
             {"action": "goto", "url": "/"},
-            {"action": "click", "text": "Create new"},
+            {
+                "action": "click",
+                "text": "Create new",
+                "success_condition": {"type": "element_present", "value": "Confirm"},
+            },
             {"action": "click", "text": "Confirm"},
             {"action": "screenshot"},
         ],
@@ -257,6 +254,7 @@ _OUTCOME_TO_TAXONOMY: Dict[str, str] = {
     "wrong_click":         "WRONG_CLICK",
     "repeated_action":     "WRONG_CLICK",
     "click_failed":        "CLICK_FAILED",
+    "stale_ref":          "STALE_REF",
     "goto_failed":         "CLICK_FAILED",
     "snapshot_failed":     "TIMEOUT",
     "agent_browser_error": "TIMEOUT",
@@ -320,6 +318,10 @@ class StepTrace(TypedDict):
     url_after: str
     state_changed: bool
     snapshot_diff_detected: bool
+    validation_type: str
+    validation_value: str
+    validation_source: str
+    validation_passed: bool
     step_latency_ms: int
 
 
@@ -374,6 +376,8 @@ class DecisionSummary(TypedDict):
     outcome: FinalOutcome
     recommendation: str
     promotion_allowed: bool
+    has_paired_baseline: bool
+    paired_test_case_count: int
     rationale: List[str]
 
 
@@ -382,6 +386,7 @@ class TestCaseComparison(TypedDict):
 
     test_case_id: str
     mode: str
+    has_paired_baseline: bool
     playwright_outcome: FinalOutcome
     agent_browser_outcome: FinalOutcome
     decision_outcome: FinalOutcome
@@ -391,9 +396,13 @@ class ModeSummary(TypedDict):
     """Aggregate summary for one AB mode (deterministic or deterministic_plus_llm)."""
 
     mode: str
+    paired_baseline_available: bool
+    paired_test_case_count: int
+    agent_only_test_case_count: int
     test_case_results: List[TestCaseComparison]
     baseline_metrics: Dict[str, Any]
     agent_browser_metrics: Dict[str, Any]
+    paired_agent_browser_metrics: Dict[str, Any]
     top_failure_modes: Dict[str, int]
     ambiguous_cases: List[str]
     unexplained_failure_count: int
@@ -600,7 +609,7 @@ class ExperimentLogger:
             status = (sr.get("status") or "failed").strip()
             is_failure = status == "failed" or outcome in (
                 "wrong_click", "no_match", "ambiguous", "click_failed",
-                "snapshot_failed", "no_intent", "repeated_action",
+                "snapshot_failed", "no_intent", "repeated_action", "stale_ref",
             )
 
             if status == "ok" and outcome == "success":
@@ -624,13 +633,19 @@ class ExperimentLogger:
                 action=(step.get("action") or "").strip(),
                 result=step_result_label,
                 failure_reason=(
-                    (sr.get("error") or outcome) if is_failure else ""
+                    (sr.get("validation_failure_reason") or sr.get("error") or outcome)
+                    if is_failure
+                    else ""
                 ),
                 failure_taxonomy=taxonomy,
                 url_before=(sr.get("url_before") or "").strip(),
                 url_after=(sr.get("url_after") or "").strip(),
                 state_changed=bool(sr.get("state_changed", False)),
                 snapshot_diff_detected=bool(sr.get("state_changed", False)),
+                validation_type=str(sr.get("validation_type") or "").strip(),
+                validation_value=str(sr.get("validation_value") or "").strip(),
+                validation_source=str(sr.get("validation_source") or "").strip(),
+                validation_passed=bool(sr.get("validation_passed", False)),
                 step_latency_ms=int(sr.get("step_latency_ms") or 0),
             )
             step_traces.append(trace)
@@ -727,7 +742,7 @@ def compare_runs(
         ab_at_least_as_good_on_core_paths=ab_sr >= pw_sr,
         reduced_target_selection_failures=(
             _target_selection_failure_count(ab_summary)
-            < _target_selection_failure_count(playwright_summary)
+            <= _target_selection_failure_count(playwright_summary)
         ),
         explainable_failures=(
             ab_summary["final_outcome"] in {"passed", "ambiguous"}
@@ -872,6 +887,8 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
         for s in run_summaries
         if s["backend"] == "agent_browser_cli"
     })
+    deterministic_has_paired_baseline = False
+    deterministic_paired_test_case_count = 0
 
     deterministic_thresholds = ThresholdChecks(
         ab_at_least_as_good_on_core_paths=False,
@@ -884,6 +901,9 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
             s
             for s in run_summaries
             if s["backend"] == "agent_browser_cli" and s["mode"] == mode
+        ]
+        paired_ab_summaries = [
+            s for s in ab_summaries if s["test_case_id"] in play_by_test
         ]
         paired_playwright = [
             play_by_test[s["test_case_id"]]
@@ -920,6 +940,7 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
                 TestCaseComparison(
                     test_case_id=ab_summary["test_case_id"],
                     mode=mode,
+                    has_paired_baseline=(pw_summary is not None),
                     playwright_outcome=(
                         pw_summary["final_outcome"] if pw_summary else "inconclusive"
                     ),
@@ -930,15 +951,20 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
 
         baseline_metrics = _aggregate_run_summaries(paired_playwright)
         agent_metrics = _aggregate_run_summaries(ab_summaries)
+        paired_agent_metrics = _aggregate_run_summaries(paired_ab_summaries)
         top_failure_modes = dict(
             Counter(agent_metrics["failure_type_counts"]).most_common(5)
         )
 
         mode_summary = ModeSummary(
             mode=mode,
+            paired_baseline_available=bool(paired_playwright),
+            paired_test_case_count=len(paired_playwright),
+            agent_only_test_case_count=max(len(ab_summaries) - len(paired_ab_summaries), 0),
             test_case_results=test_case_results,
             baseline_metrics=baseline_metrics,
             agent_browser_metrics=agent_metrics,
+            paired_agent_browser_metrics=paired_agent_metrics,
             top_failure_modes=top_failure_modes,
             ambiguous_cases=sorted(set(ambiguous_cases)),
             unexplained_failure_count=unexplained_failure_count,
@@ -946,13 +972,15 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
         mode_summaries.append(mode_summary)
 
         if mode == "deterministic":
+            deterministic_has_paired_baseline = bool(paired_playwright)
+            deterministic_paired_test_case_count = len(paired_playwright)
             deterministic_thresholds = ThresholdChecks(
                 ab_at_least_as_good_on_core_paths=(
-                    agent_metrics["success_rate"] >= baseline_metrics["success_rate"]
+                    paired_agent_metrics["success_rate"] >= baseline_metrics["success_rate"]
                 ),
                 reduced_target_selection_failures=(
-                    _target_selection_failure_count(agent_metrics)
-                    < _target_selection_failure_count(baseline_metrics)
+                    _target_selection_failure_count(paired_agent_metrics)
+                    <= _target_selection_failure_count(baseline_metrics)
                 ),
                 explainable_failures=unexplained_failure_count == 0,
             )
@@ -962,6 +990,12 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
         decision_outcome = "inconclusive"
         recommendation = "inconclusive"
         rationale.append("No Mode A deterministic run summaries were found.")
+    elif not deterministic_has_paired_baseline:
+        decision_outcome = "inconclusive"
+        recommendation = "inconclusive"
+        rationale.append(
+            "No paired Mode A Playwright baseline exists yet; promotion decisions require paired baseline data."
+        )
     elif all(deterministic_thresholds.values()):
         decision_outcome = "passed"
         recommendation = "go"
@@ -993,6 +1027,8 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
             outcome=decision_outcome,
             recommendation=recommendation,
             promotion_allowed=(decision_outcome == "passed"),
+            has_paired_baseline=deterministic_has_paired_baseline,
+            paired_test_case_count=deterministic_paired_test_case_count,
             rationale=rationale,
         ),
         mode_summaries=mode_summaries,

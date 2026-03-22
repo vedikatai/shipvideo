@@ -90,6 +90,27 @@ class DomSnapshot(TypedDict):
 #: taking a dependency on the browser sub-package.
 ExperimentMode = Literal["deterministic", "deterministic_plus_llm"]
 
+#: Explicit post-click validation condition used by Priority 1 structured
+#: success validation in the Agent Browser runner.
+SuccessConditionType = Literal["url_match", "text_present", "element_present"]
+
+
+class SuccessCondition(TypedDict):
+    """
+    Explicit post-click success condition for one step.
+
+    Fields:
+        type  — one of:
+                  "url_match"       → post-click URL must contain value
+                  "text_present"    → post-click snapshot_text must contain value
+                  "element_present" → post-click snapshot must contain an element
+                                       whose accessible name matches value
+        value — string to validate against the post-click page state.
+    """
+
+    type: SuccessConditionType
+    value: str
+
 class AgentBrowserElement(TypedDict):
     """
     One normalized interactive element from an agent-browser accessibility

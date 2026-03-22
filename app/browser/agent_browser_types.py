@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, TypedDict
 
-from app.dom_schema import ExperimentMode  # noqa: F401 — re-used in SelectionResult
+from app.dom_schema import ExperimentMode
 
 
 class CommandResult(TypedDict):
@@ -144,3 +144,30 @@ class SelectionResult(TypedDict):
     candidates: List[RefCandidate]
     intent: str
     mode: ExperimentMode
+
+
+ValidationSource = Literal["step", "test_case", "legacy_state_change", ""]
+
+
+class StepValidationResult(TypedDict):
+    """
+    Structured post-click validation result recorded by the AB runner.
+
+    Fields:
+        condition_type   — validation type used for the step:
+                           "url_match" | "text_present" | "element_present" |
+                           "state_changed" | "".
+        condition_value  — expected value for structured validation, or "" for
+                           legacy state-change fallback.
+        source           — whether the validation came from the step payload,
+                           fixed test-case metadata, or legacy fallback.
+        passed           — True when the post-click page state satisfied the
+                           validation rule.
+        failure_reason   — reason string when validation failed, else "".
+    """
+
+    condition_type: str
+    condition_value: str
+    source: ValidationSource
+    passed: bool
+    failure_reason: str

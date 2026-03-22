@@ -7,9 +7,10 @@ from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import Page, sync_playwright
 
+from app.browser.agent_browser_types import StepValidationResult
 from app.config_types import CaptureSettings
 from app.context.dom_extractor import extract_dom_context
-from app.dom_schema import ExperimentMode
+from app.dom_schema import ExperimentMode, SuccessCondition
 from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
 from app.llm.retry_engine import regenerate_with_feedback
 from app.policy.selector_validator import validate_step_against_dom
@@ -106,6 +107,7 @@ def _classify_final_outcome(*, success: bool, failure_reason: str = "") -> str:
         "no_match",
         "no_intent",
         "repeated_action",
+        "stale_ref",
     )
     if reason.startswith(regression_prefixes):
         return "regressed"
@@ -117,6 +119,125 @@ def _resolve_url(base: str, path: str) -> str:
     if path.startswith("http://") or path.startswith("https://"):
         return path
     return base.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
+    """Return a validated SuccessCondition dict, or None when invalid/missing."""
+    if not isinstance(raw, dict):
+        return None
+    cond_type = str(raw.get("type") or "").strip()
+    cond_value = str(raw.get("value") or "").strip()
+    if cond_type not in {"url_match", "text_present", "element_present"}:
+        return None
+    if not cond_value:
+        return None
+    return SuccessCondition(type=cond_type, value=cond_value)
+
+
+def _extract_success_condition(step: Dict[str, Any]) -> Optional[SuccessCondition]:
+    """Read structured click validation metadata from a step dict."""
+    return _normalize_success_condition(
+        step.get("success_condition") or step.get("validation_condition")
+    )
+
+
+def _contains_ci(haystack: str, needle: str) -> bool:
+    return needle.lower() in haystack.lower()
+
+
+def _matches_success_condition(
+    condition: SuccessCondition,
+    *,
+    current_url: str,
+    snapshot_text: str,
+    element_names: List[str],
+) -> bool:
+    """Evaluate one explicit success condition against one page state."""
+    expected = condition["value"]
+    cond_type = condition["type"]
+    if cond_type == "url_match":
+        return _contains_ci(current_url, expected)
+    if cond_type == "text_present":
+        return _contains_ci(snapshot_text, expected)
+    if cond_type == "element_present":
+        return any(_contains_ci(name, expected) for name in element_names)
+    return False
+
+
+def _evaluate_click_validation(
+    *,
+    step: Dict[str, Any],
+    snap_before: Dict[str, Any],
+    snap_after: Dict[str, Any],
+    state_changed: bool,
+) -> StepValidationResult:
+    """
+    Validate the post-click page state for one click step.
+
+    Priority 1 rule:
+      - explicit structured validation wins when present
+      - otherwise fall back to an explicit legacy state-change check so the
+        runner never records a silent success
+    """
+    condition = _extract_success_condition(step)
+    if condition is None:
+        return StepValidationResult(
+            condition_type="state_changed",
+            condition_value="",
+            source="legacy_state_change",
+            passed=state_changed,
+            failure_reason="" if state_changed else "validation_failed:state_changed",
+        )
+
+    source = str(step.get("validation_source") or "step")
+    before_matches = _matches_success_condition(
+        condition,
+        current_url=str(snap_before.get("current_url") or ""),
+        snapshot_text=str(snap_before.get("snapshot_text") or ""),
+        element_names=[
+            str(el.get("name") or "")
+            for el in (snap_before.get("interactive_elements") or [])
+            if isinstance(el, dict)
+        ],
+    )
+    after_matches = _matches_success_condition(
+        condition,
+        current_url=str(snap_after.get("current_url") or ""),
+        snapshot_text=str(snap_after.get("snapshot_text") or ""),
+        element_names=[
+            str(el.get("name") or "")
+            for el in (snap_after.get("interactive_elements") or [])
+            if isinstance(el, dict)
+        ],
+    )
+    passed = after_matches and (state_changed or not before_matches)
+    return StepValidationResult(
+        condition_type=condition["type"],
+        condition_value=condition["value"],
+        source=source if source in {"step", "test_case"} else "step",
+        passed=passed,
+        failure_reason="" if passed else f"validation_failed:{condition['type']}:{condition['value']}",
+    )
+
+
+def _is_stale_ref_error(error_message: str, click_target: str) -> bool:
+    """
+    Best-effort stale-ref classification for Agent Browser click failures.
+
+    Only ref-based clicks (@e1 style) can become stale in the snapshot sense.
+    """
+    if not click_target.startswith("@"):
+        return False
+    lowered = error_message.lower()
+    stale_markers = (
+        "stale",
+        "unknown ref",
+        "invalid ref",
+        "could not find element",
+        "element not found",
+        "no such element",
+    )
+    return any(marker in lowered for marker in stale_markers)
 
 
 def _execute_one(
@@ -350,10 +471,11 @@ def run_ab_stepwise(
         snapshot_failed — cannot read current page state.
         no_intent       — step has no text and no parseable selector.
 
-    Non-fatal outcomes (recorded, loop continues):
-        wrong_click     — click ran without error but no state change
-                          detected after all retries. Recorded for accuracy
-                          analysis in Phase 4. Loop continues to next step.
+    Validation outcomes:
+        success         — explicit post-click validation passed.
+        wrong_click     — click ran without error, but the explicit post-click
+                          validation condition was not satisfied after retries.
+                          This is a step failure.
 
     Return shape is identical to run_stepwise so step_execution.py can
     process both paths with the same logic.
@@ -564,12 +686,16 @@ def run_ab_stepwise(
                     try:
                         cli.click(click_target)
                     except AgentBrowserError as exc:
-                        # Possible stale ref — re-snapshot and retry selection.
-                        outcome = "click_failed"
-                        step_result["error"] = str(exc)
-                        _log("ab_runner.click_failed", {
+                        error_message = str(exc)
+                        outcome = (
+                            "stale_ref"
+                            if _is_stale_ref_error(error_message, click_target)
+                            else "click_failed"
+                        )
+                        step_result["error"] = error_message
+                        _log(f"ab_runner.{outcome}", {
                             "index": step_idx, "attempt": attempt,
-                            "ref": click_target, "error": str(exc),
+                            "ref": click_target, "error": error_message,
                         })
                         continue  # retry: re-snapshot will get fresh refs
 
@@ -611,22 +737,38 @@ def run_ab_stepwise(
                     })
                     last_action_key = action_key
 
-                    if state_changed:
-                        # Success: observable UI change confirmed.
+                    validation = _evaluate_click_validation(
+                        step=step,
+                        snap_before=snap,
+                        snap_after=snap_after,
+                        state_changed=state_changed,
+                    )
+                    step_result.update({
+                        "validation_type": validation["condition_type"],
+                        "validation_value": validation["condition_value"],
+                        "validation_source": validation["source"],
+                        "validation_passed": validation["passed"],
+                    })
+
+                    if validation["passed"]:
                         outcome = "success"
-                        _log("ab_runner.state_changed", {
+                        _log("ab_runner.validation_passed", {
                             "index": step_idx, "attempt": attempt,
-                            "url_before": url_before, "url_after": url_after,
+                            "url_before": url_before,
+                            "url_after": url_after,
+                            "validation_type": validation["condition_type"],
+                            "validation_source": validation["source"],
                         })
                         break
                     else:
-                        # Wrong click: technically succeeded, wrong result.
-                        # Defined per plan: click ran without error, but expected
-                        # success condition (state change) was not reached.
                         outcome = "wrong_click"
+                        step_result["validation_failure_reason"] = validation["failure_reason"]
                         _log("ab_runner.wrong_click", {
                             "index": step_idx, "attempt": attempt,
-                            "ref": click_target, "intent": intent,
+                            "ref": click_target,
+                            "intent": intent,
+                            "validation_type": validation["condition_type"],
+                            "validation_failure_reason": validation["failure_reason"],
                         })
                         # Retry: re-snapshot may reveal updated element tree.
 
@@ -638,7 +780,7 @@ def run_ab_stepwise(
                 # Fatal outcomes: stop the run immediately.
                 _FATAL_OUTCOMES = frozenset({
                     "no_match", "ambiguous", "repeated_action",
-                    "click_failed", "snapshot_failed", "no_intent",
+                    "click_failed", "snapshot_failed", "no_intent", "stale_ref", "wrong_click",
                 })
                 if outcome in _FATAL_OUTCOMES:
                     step_result["status"] = "failed"
@@ -656,9 +798,6 @@ def run_ab_stepwise(
                         "metrics": _build_metrics(results, len(initial_steps), _total_retries),
                     }
 
-                # wrong_click after retry exhaustion is non-fatal: the step ran,
-                # it just did not produce an expected state change. Recorded for
-                # Phase 4 accuracy analysis; execution continues.
                 step_result["status"] = "ok"
                 steps_succeeded += 1
                 results.append(step_result)
