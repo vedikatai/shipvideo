@@ -2,12 +2,19 @@
 LLM cost and safety guards. Change limits and behavior here without touching pipeline logic.
 
 - max_completion_tokens: cap Azure response size
-- budget: pause LLM spend above a dollar limit (internal tracking, or from Azure Cost Management)
+- budget: pause LLM spend above a limit in your Azure billing currency (INR, USD, …)
 - dedupe: skip re-running for the same PR+commit (redeliveries)
 - skip_llm_for_size: skip LLM when diff payload is too large (use fallback steps)
 
 Optional: set AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-to use Azure Cost Management API for real month-to-date spend (then we compare to BUDGET_LIMIT_USD).
+to use Azure Cost Management API for real month-to-date spend (same currency Azure bills in).
+
+Env:
+  BILLING_CURRENCY   — ISO code, default INR (e.g. INR, USD)
+  BUDGET_LIMIT       — cap in that currency (preferred)
+  BUDGET_LIMIT_USD   — legacy alias for BUDGET_LIMIT (same numeric meaning: your billing currency)
+  PRICE_PER_1K_INPUT / PRICE_PER_1K_OUTPUT — per-1K-token estimate in BILLING_CURRENCY (for local logs only)
+
 Optional: set AZURE_BILLING_ACCOUNT_ID to fetch current credit balance (Consumption Balances API).
 When Azure is configured, expenditure/remaining/budget come from Azure only; we do not write to the local spend file.
 """
@@ -29,18 +36,36 @@ except ImportError:
 MAX_RESPONSE_TOKENS = 500
 """Cap on Azure response tokens so a single response can't be huge."""
 
-BUDGET_LIMIT_USD = 15.0
-"""Budget cap: when Azure month-to-date spend exceeds this, we skip LLM. Period: per calendar month (we use MonthToDate)."""
+BILLING_CURRENCY = os.getenv("BILLING_CURRENCY", "INR").strip().upper() or "INR"
+"""Azure subscription billing currency (Cost Management MTD is returned in this currency)."""
 
-# Azure Cost Management returns spend in your subscription's billing currency (USD, INR, etc.).
-# Set BUDGET_LIMIT_USD to a value in the same currency Azure returns (e.g. 15 for $15 or 1500 for ₹1500).
+
+def _resolve_budget_limit() -> float:
+    if os.getenv("BUDGET_LIMIT") is not None and os.getenv("BUDGET_LIMIT", "").strip() != "":
+        return float(os.getenv("BUDGET_LIMIT", "0"))
+    if os.getenv("BUDGET_LIMIT_USD") is not None and os.getenv("BUDGET_LIMIT_USD", "").strip() != "":
+        return float(os.getenv("BUDGET_LIMIT_USD", "0"))
+    # Sensible defaults: INR accounts are common for Indian billing; USD fallback otherwise
+    if BILLING_CURRENCY == "INR":
+        return 1500.0
+    return 15.0
+
+
+BUDGET_LIMIT = _resolve_budget_limit()
+"""Budget cap in BILLING_CURRENCY. When Azure MTD spend exceeds this, we skip LLM (month-to-date)."""
+
+# Backward compatibility: old name and tests import BUDGET_LIMIT_USD
+BUDGET_LIMIT_USD = BUDGET_LIMIT
 
 MAX_DIFF_CHARS_TO_SKIP_LLM = 12_000
 """If diff payload (after our normal truncation) exceeds this, skip LLM and use fallback."""
 
-# Approximate gpt-4o-mini pricing per 1K tokens (adjust if Azure pricing changes)
-PRICE_PER_1K_INPUT_USD = 0.000_15
-PRICE_PER_1K_OUTPUT_USD = 0.000_6
+# Per-1K-token rates in BILLING_CURRENCY (for local estimates / logs only). Override via env for your model.
+# Defaults are legacy mini-scale; set PRICE_PER_1K_INPUT/OUTPUT to match your Azure list price in INR (or USD).
+PRICE_PER_1K_INPUT = float(os.getenv("PRICE_PER_1K_INPUT", "0.00015"))
+PRICE_PER_1K_OUTPUT = float(os.getenv("PRICE_PER_1K_OUTPUT", "0.0006"))
+PRICE_PER_1K_INPUT_USD = PRICE_PER_1K_INPUT  # legacy alias
+PRICE_PER_1K_OUTPUT_USD = PRICE_PER_1K_OUTPUT
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 SPEND_FILE = DATA_DIR / "llm_spend.json"
@@ -53,6 +78,16 @@ MAX_DEDUPE_ENTRIES = 500
 DEDUPE_ENABLED = os.getenv("LLM_DEDUPE_ENABLED", "true").lower() not in {"false", "0", "no"}
 
 _lock = threading.Lock()
+
+
+def format_currency_amount(amount: float, currency: str | None = None) -> str:
+    """Format a monetary amount for logs (uses BILLING_CURRENCY by default)."""
+    cur = (currency or BILLING_CURRENCY).upper()
+    sym = {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(cur, f"{cur} ")
+    # Small per-call estimates need more precision; monthly totals use 2 decimals
+    if abs(amount) < 10:
+        return f"{sym}{amount:.4f}"
+    return f"{sym}{amount:.2f}"
 
 
 def _azure_configured() -> bool:
@@ -101,7 +136,7 @@ def _get_azure_token() -> str | None:
 
 def fetch_azure_cost_month_to_date() -> float | None:
     """
-    Fetch current month-to-date spend (USD) from Azure Cost Management API.
+    Fetch current month-to-date spend from Azure Cost Management API (subscription billing currency).
     Requires env: AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET.
     Returns None if not configured or on error.
     """
@@ -212,17 +247,32 @@ def get_budget_status() -> dict:
     balance_info = fetch_azure_credit_balance()
     result: dict = {}
     if spend_azure is not None:
-        result = {"current_spend_usd": spend_azure, "limit_usd": BUDGET_LIMIT_USD, "source": "azure"}
+        result = {
+            "currency": BILLING_CURRENCY,
+            "current_spend": spend_azure,
+            "budget_limit": BUDGET_LIMIT,
+            "current_spend_usd": spend_azure,
+            "limit_usd": BUDGET_LIMIT,
+            "source": "azure",
+        }
     else:
         _ensure_data_dir()
         total = 0.0
         if SPEND_FILE.exists():
             try:
                 with open(SPEND_FILE) as f:
-                    total = float(json.load(f).get("total_usd", 0))
+                    data = json.load(f)
+                    total = float(data.get("total", data.get("total_usd", 0)))
             except Exception:
                 pass
-        result = {"current_spend_usd": total, "limit_usd": BUDGET_LIMIT_USD, "source": "local"}
+        result = {
+            "currency": BILLING_CURRENCY,
+            "current_spend": total,
+            "budget_limit": BUDGET_LIMIT,
+            "current_spend_usd": total,
+            "limit_usd": BUDGET_LIMIT,
+            "source": "local",
+        }
     if balance_info is not None:
         result["credit_balance"] = balance_info["credit_balance"]
         result["credit_balance_currency"] = balance_info["currency"]
@@ -246,8 +296,12 @@ def check_budget() -> bool:
     """
     spend_azure = fetch_azure_cost_month_to_date()
     if spend_azure is not None:
-        print(f"[llm-guards] Azure MTD spend: ${spend_azure:.2f} / ${BUDGET_LIMIT_USD} limit", flush=True)
-        if spend_azure >= BUDGET_LIMIT_USD:
+        print(
+            f"[llm-guards] Azure MTD spend: {format_currency_amount(spend_azure)} / "
+            f"{format_currency_amount(BUDGET_LIMIT)} limit ({BILLING_CURRENCY})",
+            flush=True,
+        )
+        if spend_azure >= BUDGET_LIMIT:
             print(f"[llm-guards] Budget exceeded, skipping LLM", flush=True)
             return False
         return True
@@ -258,9 +312,13 @@ def check_budget() -> bool:
         try:
             with open(SPEND_FILE) as f:
                 data = json.load(f)
-            total = float(data.get("total_usd", 0))
-            if total >= BUDGET_LIMIT_USD:
-                print(f"[llm-guards] Budget exceeded (local ${total:.2f} >= ${BUDGET_LIMIT_USD}), skipping LLM", flush=True)
+            total = float(data.get("total", data.get("total_usd", 0)))
+            if total >= BUDGET_LIMIT:
+                print(
+                    f"[llm-guards] Budget exceeded (local {format_currency_amount(total)} >= "
+                    f"{format_currency_amount(BUDGET_LIMIT)}), skipping LLM",
+                    flush=True,
+                )
                 return False
             return True
         except Exception as e:
@@ -269,8 +327,8 @@ def check_budget() -> bool:
 
 
 def estimate_run_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """Estimated cost in USD for one LLM call (for run summary)."""
-    return (prompt_tokens / 1000.0) * PRICE_PER_1K_INPUT_USD + (completion_tokens / 1000.0) * PRICE_PER_1K_OUTPUT_USD
+    """Estimated cost in BILLING_CURRENCY for one LLM call (for run summary; tune PRICE_PER_1K_*)."""
+    return (prompt_tokens / 1000.0) * PRICE_PER_1K_INPUT + (completion_tokens / 1000.0) * PRICE_PER_1K_OUTPUT
 
 
 def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
@@ -282,7 +340,11 @@ def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
     """
     estimated = estimate_run_cost(prompt_tokens, completion_tokens)
     if _azure_configured():
-        print(f"[llm-guards] LLM cost ~${estimated:.4f} (spend/balance from Azure, not recording locally)", flush=True)
+        print(
+            f"[llm-guards] LLM cost est. ~{format_currency_amount(estimated)} "
+            f"({BILLING_CURRENCY}; MTD from Azure, not recording locally)",
+            flush=True,
+        )
         return
     _ensure_data_dir()
     with _lock:
@@ -290,13 +352,26 @@ def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
         if SPEND_FILE.exists():
             try:
                 with open(SPEND_FILE) as f:
-                    total = float(json.load(f).get("total_usd", 0))
+                    raw = json.load(f)
+                    total = float(raw.get("total", raw.get("total_usd", 0)))
             except Exception:
                 pass
         total += estimated
         with open(SPEND_FILE, "w") as f:
-            json.dump({"total_usd": round(total, 4), "updated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z"}, f)
-        print(f"[llm-guards] Recorded ~${estimated:.4f}; total ~${total:.2f}", flush=True)
+            json.dump(
+                {
+                    "total": round(total, 4),
+                    "total_usd": round(total, 4),
+                    "currency": BILLING_CURRENCY,
+                    "updated_at": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+                },
+                f,
+            )
+        print(
+            f"[llm-guards] Recorded ~{format_currency_amount(estimated)}; "
+            f"total ~{format_currency_amount(total)} ({BILLING_CURRENCY})",
+            flush=True,
+        )
 
 
 def check_already_ran(repo: str, pr_number: int, commit_sha: str) -> bool:

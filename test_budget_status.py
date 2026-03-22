@@ -43,7 +43,12 @@ def main():
         sys.exit(1)
 
     sys.path.insert(0, str(ROOT))
-    from app.llm_guards import get_budget_status, fetch_azure_cost_month_to_date, BUDGET_LIMIT_USD
+    from app.llm_guards import (
+        BILLING_CURRENCY,
+        fetch_azure_cost_month_to_date,
+        format_currency_amount,
+        get_budget_status,
+    )
 
     print("Fetching Azure Cost Management (month-to-date spend)...")
     spend = fetch_azure_cost_month_to_date()
@@ -54,15 +59,17 @@ def main():
         sys.exit(2)
 
     status = get_budget_status()
-    spend = status["current_spend_usd"]
-    limit = status["limit_usd"]
+    cur = status.get("currency", BILLING_CURRENCY)
+    spend = float(status.get("current_spend", status["current_spend_usd"]))
+    limit = float(status.get("budget_limit", status["limit_usd"]))
     remaining = max(0.0, limit - spend)
 
     print("--- Expenditure / remaining / budget (from Azure) ---")
     print(f"Source: {status['source']}")
-    print(f"Expenditure (MTD): ${spend:.2f}")
-    print(f"Budget limit:      ${limit:.2f}")
-    print(f"Remaining:        ${remaining:.2f}")
+    print(f"Currency: {cur}")
+    print(f"Expenditure (MTD): {format_currency_amount(spend, cur)}")
+    print(f"Budget limit:      {format_currency_amount(limit, cur)}")
+    print(f"Remaining:         {format_currency_amount(remaining, cur)}")
     print(f"Under budget:     {spend < limit}")
 
     if "credit_balance" in status:

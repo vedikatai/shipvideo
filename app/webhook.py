@@ -4,7 +4,13 @@ from pathlib import Path
 from fastapi.responses import StreamingResponse
 from threading import Thread
 from app.github_comment import comment_on_pr
-from app.llm_guards import check_already_ran, get_budget_status, record_run
+from app.llm_guards import (
+    BILLING_CURRENCY,
+    check_already_ran,
+    format_currency_amount,
+    get_budget_status,
+    record_run,
+)
 from app.steps.pipeline import analyze_pr, run_pipeline
 from app.steps.pr_extraction import fetch_pr_diff
 from app.preview_url_resolver import get_preview_url, wait_for_preview_ready
@@ -403,19 +409,31 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             finally:
                 print("\n===== PIPELINE SUMMARY =====", flush=True)
                 try:
-                    print(f"LLM this run        ${run_llm_cost_usd:.4f}", flush=True)
+                    cur = (
+                        run_budget_status.get("currency", BILLING_CURRENCY)
+                        if run_budget_status
+                        else BILLING_CURRENCY
+                    )
+                    print(
+                        f"LLM this run        {format_currency_amount(run_llm_cost_usd, cur)} ({cur} est.)",
+                        flush=True,
+                    )
                     if run_budget_status:
                         spent = float(run_budget_status.get("current_spend_usd", 0.0) or 0.0)
                         limit = float(run_budget_status.get("limit_usd", 0.0) or 0.0)
                         source = run_budget_status.get("source", "local")
                         print(
-                            f"LLM month-to-date   ${spent:.2f} / ${limit:.2f} ({source})",
+                            f"LLM month-to-date   {format_currency_amount(spent, cur)} / "
+                            f"{format_currency_amount(limit, cur)} ({source}, {cur})",
                             flush=True,
                         )
                         credit = run_budget_status.get("credit_balance")
                         currency = run_budget_status.get("credit_balance_currency", "USD")
                         if credit is not None:
-                            print(f"Azure credit        {credit:.2f} {currency}", flush=True)
+                            print(
+                                f"Azure credit        {format_currency_amount(float(credit), currency)}",
+                                flush=True,
+                            )
                 except Exception:
                     pass
                 print_pipeline_summary()
