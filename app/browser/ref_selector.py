@@ -127,6 +127,13 @@ def _apply_mode(result: SelectionResult, mode: ExperimentMode) -> SelectionResul
 # Regex for extracting testid value from CSS selector strings like
 # [data-testid='generate-api-key'] or [data-testid="submit-btn"].
 _TESTID_RE = re.compile(r"""\[data-testid=['"]([^'"]+)['"]\]""")
+# First #id in a selector (e.g. #nested-lab-open-main, div#foo > span).
+_ID_FRAGMENT_RE = re.compile(r"#([\w-]+)")
+
+
+def _slug_to_intent(slug: str) -> str:
+    """Turn a testid or DOM id slug into words for fuzzy a11y name matching."""
+    return slug.replace("-", " ").replace("_", " ").strip()
 
 
 def derive_intent(step: Dict[str, Any]) -> str:
@@ -142,7 +149,9 @@ def derive_intent(step: Dict[str, Any]) -> str:
         2. data-testid      — extracted from step["selector"] and converted to
                                human-readable form ("generate-api-key" →
                                "generate api key").
-        3. ""               — intent cannot be derived; caller should treat
+        3. #id selector     — first `#foo-bar` fragment → "foo bar" for partial
+                               matching against accessible names.
+        4. ""               — intent cannot be derived; caller should treat
                                this as a fatal step failure.
 
     Args:
@@ -161,8 +170,11 @@ def derive_intent(step: Dict[str, Any]) -> str:
     if selector:
         m = _TESTID_RE.search(selector)
         if m:
-            # "generate-api-key" → "generate api key" for fuzzy name matching.
-            return m.group(1).replace("-", " ").replace("_", " ")
+            return _slug_to_intent(m.group(1))
+        m_id = _ID_FRAGMENT_RE.search(selector)
+        if m_id:
+            # "#nested-lab-open-main" → "nested lab open main"
+            return _slug_to_intent(m_id.group(1))
 
     return ""
 

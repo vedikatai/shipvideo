@@ -515,8 +515,23 @@ def run_ab_stepwise(
                         "selection_reason": sel["selection_reason"],
                     })
 
-                    if not sel["chosen_ref"]:
-                        # no_match or ambiguous — cannot safely click; do not retry.
+                    # If a11y name matching fails but the planner sent a CSS/XPath selector,
+                    # fall back to agent-browser click(<selector>) — the stock CLI accepts
+                    # refs (@e1), CSS, or XPath (see `agent-browser click --help`).
+                    raw_selector = (step.get("selector") or "").strip()
+                    if sel["chosen_ref"]:
+                        click_target = sel["chosen_ref"]
+                    elif sel["selection_reason"] == "no_match" and raw_selector:
+                        click_target = raw_selector
+                        step_result.update({
+                            "chosen_ref": raw_selector,
+                            "selection_reason": "css_selector_fallback",
+                        })
+                        _log("ab_runner.css_selector_fallback", {
+                            "index": step_idx, "selector": raw_selector, "intent": intent,
+                        })
+                    else:
+                        # ambiguous (or no_match with no selector) — cannot safely click.
                         outcome = sel["selection_reason"]
                         _log("ab_runner.selection_failed", {
                             "index": step_idx, "attempt": attempt,
@@ -524,14 +539,14 @@ def run_ab_stepwise(
                         })
                         break
 
-                    # Repeat-action guard: same ref on same URL without prior
+                    # Repeat-action guard: same target on same URL without prior
                     # state change means we are stuck in a loop.
-                    action_key = f"{snap['current_url']}:{sel['chosen_ref']}"
+                    action_key = f"{snap['current_url']}:{click_target}"
                     if action_key == last_action_key:
                         outcome = "repeated_action"
                         _log("ab_runner.repeated_action", {
                             "index": step_idx,
-                            "ref": sel["chosen_ref"],
+                            "ref": click_target,
                             "url": snap["current_url"],
                         })
                         break
@@ -545,16 +560,16 @@ def run_ab_stepwise(
                     except AgentBrowserError:
                         pass  # non-fatal
 
-                    # Execute the click.
+                    # Execute the click (ref @e1 or CSS/XPath from fallback).
                     try:
-                        cli.click(sel["chosen_ref"])
+                        cli.click(click_target)
                     except AgentBrowserError as exc:
                         # Possible stale ref — re-snapshot and retry selection.
                         outcome = "click_failed"
                         step_result["error"] = str(exc)
                         _log("ab_runner.click_failed", {
                             "index": step_idx, "attempt": attempt,
-                            "ref": sel["chosen_ref"], "error": str(exc),
+                            "ref": click_target, "error": str(exc),
                         })
                         continue  # retry: re-snapshot will get fresh refs
 
@@ -611,7 +626,7 @@ def run_ab_stepwise(
                         outcome = "wrong_click"
                         _log("ab_runner.wrong_click", {
                             "index": step_idx, "attempt": attempt,
-                            "ref": sel["chosen_ref"], "intent": intent,
+                            "ref": click_target, "intent": intent,
                         })
                         # Retry: re-snapshot may reveal updated element tree.
 
