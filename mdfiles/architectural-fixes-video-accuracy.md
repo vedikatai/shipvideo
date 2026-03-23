@@ -82,13 +82,29 @@ Without one, each layer makes local decisions and drift is undetectable.
    - `terminal: TerminalCondition`
    - `contract_id: str`
    - `confidence: Literal["high","medium","low"]`
-2. Build contract in `pipeline.analyze_pr()` in a dedicated extraction step **before** planning.
-   - Keep extraction simple at first, but explicit and typed.
+2. Build contract in `pipeline.analyze_pr()` using at least one **independent** source before planning.
+   - Do **not** derive contract from the same planner call that generates steps.
+   - Recommended extraction pipeline (in order):
+     - `extract_contract_static(diff_files)` in new `app/steps/contract_extraction.py`
+       - `start_route`: infer from changed route files (`app/**/page.tsx`, `pages/**`) and existing `_extract_routes_from_diff` style logic.
+       - `targets`: parse added JSX/text literals for probable CTA labels, plus `data-testid`/`aria-label` anchors.
+       - `terminal`: detect completion markers from added attributes/strings (`complete|success|done|finish`) and normalize to typed condition.
+     - optional `extract_contract_llm(diff_files)` as a **separate JSON-only extraction call** (no DOM, no step planning) returning only contract fields + confidence.
+   - Merge strategy:
+     - static + extraction-LLM agreement -> `confidence=high`
+     - partial agreement -> `confidence=medium`
+     - extraction-LLM only or ambiguous static -> `confidence=low`
+   - Rule: low-confidence contract cannot auto-run full demo; either regenerate extraction or degrade to safe fallback.
 3. Pass contract through:
    - into `generate_steps_from_diff(...)`
    - into `run_capture(...)` and then runner path
 4. Include contract in `generation_context` so stepwise and script paths share the same objective.
 5. Reject "unguided" contracts for full demo runs (or flag them and force fallback mode).
+6. Add contract provenance fields for auditability:
+   - `source_static: bool`
+   - `source_extraction_llm: bool`
+   - `agreement_score: float`
+   - `extraction_notes: List[str]`
 
 ### Integration with the pipeline
 - `pipeline.py` owns contract lifecycle.
@@ -98,6 +114,7 @@ Without one, each layer makes local decisions and drift is undetectable.
 
 ### Expected impact
 - Eliminates silent plan corruption between stages.
+- Breaks circular validation (contract no longer derived from planner output itself).
 - Makes failures attributable: extraction vs planning vs execution.
 - Enables deterministic gating and meaningful metrics.
 
@@ -138,18 +155,34 @@ That is cleanup, not contract enforcement.
      - explicit `assert_terminal` step exists and matches contract terminal
      - no degenerate plan (e.g., zero click steps)
 4. In `pipeline.py`:
-   - if preflight fails, call generation one more time with structured errors
+   - if preflight fails, call a **separate repair-generation path** one time with structured errors
    - if second preflight fails, abort as `plan_invalid`; do not execute
+5. Add hard retry constraints (non-negotiable):
+   - second attempt must use a different prompt template than first attempt:
+     - include only: `DemoContract`, preflight failures, reconciled DOM match summary
+     - exclude: raw diff payload, broad DOM dumps (`real_buttons` full list), long narrative instructions
+   - enforce bounded output schema for repair:
+     - only `steps` array
+     - max steps cap (e.g., 8)
+     - required actions: `goto`, `click`, `screenshot`, `assert_terminal`
+   - require explicit "fix list" acknowledgement in response:
+     - each preflight error maps to at least one corrected step id
+   - no third attempt in `analyze_pr`; fail fast after second preflight failure.
+6. Implement repair call as separate function in `step_generation.py`:
+   - `regenerate_steps_from_preflight(contract, preflight_errors, dom_hints) -> steps`
+   - internally use a dedicated system message and reduced context payload.
 
 ### Integration with the pipeline
 - Generation produces candidate steps.
 - Reconciliation annotates, preflight decides.
 - Only preflight-passed plans proceed to `run_capture`.
-- Failures return structured reasons that can be fed back to LLM regeneration.
+- Failures trigger one constrained repair call (contract + errors only), then re-preflight.
+- Structured reasons are transformed into deterministic repair inputs, not appended to the original noisy prompt.
 
 ### Expected impact
 - Removes "broken plan reaches browser" failure class.
 - Converts hidden cleanup losses into explicit regeneration or abort.
+- Avoids expensive "same prompt, same mistakes" retries by forcing a structurally different second pass.
 - Improves consistency of captured videos and reduces wasted runs.
 
 ---
@@ -177,21 +210,28 @@ Default backend should not be less adaptive than fallback backend.
    - trigger on `no_match`, `ambiguous`, repeated `wrong_click` (not stale-ref single retry case)
    - replan remaining steps from fresh AB snapshot + contract remainder
 2. Add run-level limits:
-   - max replans per run (e.g., 2)
+   - max replans per run: **1** (hard cap)
    - max total step budget retained
 3. Feed replan failures into typed integrity/reporting errors (Fix 5).
 4. Keep fatal exit when replan budget is exhausted (`unrecoverable` outcome).
+5. On failed replan, surface the unreachable contract target explicitly:
+   - `unreachable_target_label`
+   - `unreachable_target_index`
+   - `failure_stage=execution`
+   - abort immediately (no second replan).
 
 ### Integration with the pipeline
 - AB execution remains primary.
 - On divergence, AB requests targeted replan of remaining objectives.
 - Contract ensures replans do not drift off-goal.
 - Metrics capture number and reason of replans.
+- Replan is explicitly runtime-drift recovery, not a band-aid for weak extraction/preflight.
 
 ### Expected impact
 - Reduces hard aborts from resolvable runtime drift.
 - Improves completion rate on dynamic staging pages.
 - Makes AB behavior closer to the existing adaptive model in Playwright path.
+- Prevents runtime recovery from masking upstream planning/extraction defects.
 
 ---
 
