@@ -2,4 +2,6 @@ set -e
 conda deactivate
 source .venv/bin/activate
 source export_secrets.sh
+
+
 uvicorn app.webhook:app --reload --port 8000

@@ -23,6 +23,10 @@ jobs:
       # Optional: only needed if visual fallback is triggered
       AZURE_OPENAI_VISION_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_VISION_DEPLOYMENT }}
 
+      # Default capture is Agent Browser + stepwise; CI has no agent-browser binary — use Playwright stepwise.
+      BROWSER_BACKEND: playwright
+      VIDEO_PIPELINE: stepwise
+
       # Use R2 upload in CI only if you want PR comment URLs to point to real storage.
       # This workflow uploads artifacts regardless.
       SHIPVIDEO_UPLOAD_R2: "false"

@@ -368,6 +368,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
 
                     summary_path = BASE_DIR / "data" / "pipeline_run_summary.json"
                     summary_path.parent.mkdir(parents=True, exist_ok=True)
+                    _dbg = capture_summary.get("debug") or {}
                     run_summary = {
                         "pr_number": pr_number,
                         "steps_generated": len(steps),
@@ -375,10 +376,29 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         "steps_failed": capture_summary["steps_failed"],
                         "failure_reason": capture_summary.get("failure_reason"),
                         "cost_usd": round(flow.get("llm_cost_usd", 0.0), 4),
+                        # What actually ran: script-first (Playwright generated script) vs stepwise (Playwright or Agent Browser).
+                        "video_pipeline": {
+                            "pipeline": capture_summary.get("pipeline"),
+                            "pipeline_branch": capture_summary.get("pipeline_branch"),
+                            "capture_browser": capture_summary.get("capture_browser"),
+                            "capture_path": capture_summary.get("capture_path"),
+                            "agent_browser_used": bool(
+                                capture_summary.get("agent_browser_used", False)
+                            ),
+                            "stepwise_engine": _dbg.get("engine"),
+                            "stepwise_mode": capture_summary.get("mode"),
+                        },
                     }
                     with open(summary_path, "w") as f:
                         json.dump(run_summary, f, indent=2)
                     print(f"[webhook] run summary file={summary_path.name}", flush=True)
+                    print(
+                        "[webhook] video capture: "
+                        f"branch={run_summary['video_pipeline']['pipeline_branch']!r} "
+                        f"browser={run_summary['video_pipeline']['capture_browser']!r} "
+                        f"agent_browser={run_summary['video_pipeline']['agent_browser_used']}",
+                        flush=True,
+                    )
 
                     try:
                         run_budget_status = get_budget_status()

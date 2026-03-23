@@ -111,9 +111,9 @@ def validate_step_against_dom(
 
     if action == "click":
         selector = (step.get("selector") or "").strip()
-        text = (step.get("text") or "").strip()
+        label = (step.get("label") or step.get("text") or "").strip()
 
-        if not selector and not text:
+        if not selector and not label:
             return False, "missing_click_target"
 
         if selector:
@@ -138,28 +138,28 @@ def validate_step_against_dom(
                 return True, "ok:playwright_engine"
             return True, "ok:raw_css_present_in_dom"
 
-        # text-based click: static pre-filter, then live count as authoritative gate
-        if text:
+        # label-based click: static pre-filter, then live count as authoritative gate
+        if label:
             known = _known_button_texts(dom_ctx)
 
             if page is not None:
                 # Live count is the authoritative gate
                 try:
-                    live_count = page.get_by_text(text, exact=True).count()
+                    live_count = page.get_by_text(label, exact=True).count()
                 except Exception:
                     live_count = 0
                 if live_count == 0:
-                    return False, f"text_not_found_on_page:{text}"
-                return True, "ok:text_live"
+                    return False, f"label_not_found_on_page:{label}"
+                return True, "ok:label_live"
 
             # Static fallback when no page is available
-            if text in known:
-                return True, "ok:text_exact"
-            text_lower = text.lower()
-            if any(k.lower() == text_lower for k in known):
-                return True, "ok:text_icase"
-            if any(text_lower in k.lower() or k.lower() in text_lower for k in known if k):
-                return True, "ok:text_partial"
-            return False, f"text_not_in_dom:{text}"
+            if label in known:
+                return True, "ok:label_exact"
+            label_lower = label.lower()
+            if any(k.lower() == label_lower for k in known):
+                return True, "ok:label_icase"
+            if any(label_lower in k.lower() or k.lower() in label_lower for k in known if k):
+                return True, "ok:label_partial"
+            return False, f"label_not_in_dom:{label}"
 
     return True, "ok"

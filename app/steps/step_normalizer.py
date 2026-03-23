@@ -43,11 +43,14 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         if action == "click":
             selector = (step.get("selector") or step.get("element") or step.get("target") or "").strip()
+            label = (step.get("label") or "").strip()
             text = (step.get("text") or "").strip()
-            if selector:
-                normalized.append({"action": "click", "selector": selector})
+            if label:
+                normalized.append({"action": "click", "label": label})
             elif text:
-                normalized.append({"action": "click", "text": text})
+                normalized.append({"action": "click", "label": text})
+            elif selector:
+                normalized.append({"action": "click", "selector": selector})
 
         elif action == "goto":
             url = (step.get("url", "/") or "/").strip()
@@ -181,13 +184,13 @@ def validate_against_dom(
             # Normalize quote style before set lookup so [data-testid="x"]
             # matches the single-quote form stored by _short_selector.
             selector_norm = _normalize_selector_quotes(selector) if selector else ""
-            text = (step.get("text") or "").strip()
-            if (selector_norm and selector_norm in valid_selectors) or (text and text in valid_texts):
+            label = (step.get("label") or step.get("text") or "").strip()
+            if (selector_norm and selector_norm in valid_selectors) or (label and label in valid_texts):
                 accepted.append(step)
             else:
                 print(
                     "[step-validator] rejected click "
-                    f"selector={selector!r} text={text!r} (not in live DOM)",
+                    f"selector={selector!r} label={label!r} (not in live DOM)",
                     flush=True,
                 )
             continue

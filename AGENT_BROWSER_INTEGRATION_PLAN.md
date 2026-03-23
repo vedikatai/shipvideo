@@ -1,5 +1,5 @@
 # Agent Browser CLI Accuracy Validation Plan
-
+https://github.com/vercel-labs/agent-browser
 ## Scope
 This document is intentionally limited to **what we are doing now**:
 
@@ -490,6 +490,38 @@ This phase exists last because raw experiment output is not enough. We need expl
 - **Attributing gains to the wrong layer**
   - Failure mode: improvements from LLM fallback are mistakenly attributed to Agent Browser snapshot quality.
   - Mitigation: require the go / no-go decision to be based on Mode A deterministic results first.
+
+#### Findings Summary And Decision Record
+Phase 5 uses one aggregate artifact, `app/data/experiment_runs/experiment_summary.json`, as the source of truth for the decision.
+
+Go / no-go thresholds:
+- Agent Browser Mode A (`deterministic`) performs at least as well as Playwright on the paired core paths.
+- Agent Browser Mode A reduces target-selection failures (`NO_MATCH`, `AMBIGUOUS`, `WRONG_CLICK`, `CLICK_FAILED`, `STALE_REF`).
+- Every Agent Browser failure remains explainable from saved artifacts and categorized failure types.
+
+Paired-baseline requirement:
+- A repo-level promotion decision requires at least one paired Mode A comparison against Playwright for the same test case.
+- If no paired Playwright baseline exists yet, the aggregate decision must remain `inconclusive`.
+- Equal target-selection failures (`0 vs 0`, or any exact tie) are not a regression by themselves.
+
+Decision rule:
+- `passed` = all Mode A thresholds are met. Promotion to Agent Browser may be considered.
+- `ambiguous` = at least one Mode A test case remains ambiguous, so the result is not a clear win.
+- `regressed` = Mode A underperforms Playwright on success rate or target-selection failures.
+- `inconclusive` = the saved artifacts are insufficient or the results are mixed.
+
+Decision layers:
+- `final_outcome` = single-run health for the current backend invocation.
+- per-test-case benchmark outcome = paired result for one test case when a Playwright baseline exists.
+- repo-level decision = aggregate promotion recommendation across saved paired Mode A results.
+
+Current repository default (capture):
+- Video pipeline runs **stepwise only** by default (`VIDEO_PIPELINE` unset or `stepwise`). Set `VIDEO_PIPELINE=script_first` to opt into the legacy Playwright script-first path.
+- `run_capture` defaults to **Agent Browser CLI** (`run_ab_stepwise`). Set `BROWSER_BACKEND=playwright` to use Playwright stepwise instead (e.g. CI without the `agent-browser` binary).
+
+Current status in this branch:
+- The decision pipeline is implemented.
+- The written recommendation remains `inconclusive` until real experiment artifacts are generated and reviewed.
 
 ## 9. Accuracy Test Cases
 The validation should focus on the most failure-prone flows in this repo.
