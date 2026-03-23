@@ -92,6 +92,14 @@ def _attach_test_case_success_conditions(
           to the test case's top-level success_condition.
     """
     cloned_steps = [dict(step) for step in steps]
+    for step in cloned_steps:
+        explicit = (
+            _normalize_success_condition(step.get("validation_condition"))
+            or _normalize_success_condition(step.get("success_condition"))
+        )
+        if explicit is not None:
+            step["validation_condition"] = explicit
+            step.setdefault("success_condition", explicit)
     if not test_case_id:
         return cloned_steps
 
@@ -128,6 +136,7 @@ def _attach_test_case_success_conditions(
         if inherited is None and idx == last_click_index:
             inherited = fallback_condition
         if inherited is not None:
+            step["validation_condition"] = inherited
             step["success_condition"] = inherited
             step.setdefault("validation_source", "test_case")
 

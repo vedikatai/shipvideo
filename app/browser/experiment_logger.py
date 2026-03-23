@@ -254,7 +254,8 @@ _OUTCOME_TO_TAXONOMY: Dict[str, str] = {
     "wrong_click":         "WRONG_CLICK",
     "repeated_action":     "WRONG_CLICK",
     "click_failed":        "CLICK_FAILED",
-    "stale_ref":          "STALE_REF",
+    "stale_ref":           "STALE_REF",
+    "stale_ref_unrecovered": "STALE_REF",
     "goto_failed":         "CLICK_FAILED",
     "snapshot_failed":     "TIMEOUT",
     "agent_browser_error": "TIMEOUT",
@@ -274,7 +275,7 @@ def normalize_failure_taxonomy(outcome: str) -> str:
     Returns:
         Taxonomy string or "" on success/non-failure.
     """
-    if not outcome or outcome in ("success", "pending", "ok"):
+    if not outcome or outcome in ("success", "pending", "ok", "unvalidated"):
         return ""
     for key, taxonomy in _OUTCOME_TO_TAXONOMY.items():
         if outcome == key or outcome.startswith(f"{key}:"):
@@ -322,6 +323,8 @@ class StepTrace(TypedDict):
     validation_value: str
     validation_source: str
     validation_passed: bool
+    validation_result: Dict[str, Any]
+    stale_ref_count: int
     step_latency_ms: int
 
 
@@ -607,15 +610,16 @@ class ExperimentLogger:
             step = sr.get("step") or {}
             outcome = (sr.get("outcome") or "").strip()
             status = (sr.get("status") or "failed").strip()
+            validation_result = sr.get("validation_result") or {}
             is_failure = status == "failed" or outcome in (
-                "wrong_click", "no_match", "ambiguous", "click_failed",
-                "snapshot_failed", "no_intent", "repeated_action", "stale_ref",
+                "wrong_click",
+                "click_failed",
+                "stale_ref",
+                "stale_ref_unrecovered",
             )
 
             if status == "ok" and outcome == "success":
                 step_result_label = "success"
-            elif outcome == "ambiguous":
-                step_result_label = "ambiguous"
             else:
                 step_result_label = "failure" if is_failure else "success"
 
@@ -625,8 +629,8 @@ class ExperimentLogger:
                 step_index=int(sr.get("index", 0)),
                 backend=self.backend,
                 mode=self.mode,
-                intent=(sr.get("intent") or step.get("text") or "").strip(),
-                raw_snapshot_path="",
+                intent=(sr.get("intent") or step.get("label") or step.get("text") or "").strip(),
+                raw_snapshot_path=str(sr.get("raw_snapshot_path") or "").strip(),
                 chosen_ref=(sr.get("chosen_ref") or "").strip(),
                 selection_reason=(sr.get("selection_reason") or "").strip(),
                 candidate_count=0,
@@ -642,10 +646,20 @@ class ExperimentLogger:
                 url_after=(sr.get("url_after") or "").strip(),
                 state_changed=bool(sr.get("state_changed", False)),
                 snapshot_diff_detected=bool(sr.get("state_changed", False)),
-                validation_type=str(sr.get("validation_type") or "").strip(),
-                validation_value=str(sr.get("validation_value") or "").strip(),
-                validation_source=str(sr.get("validation_source") or "").strip(),
-                validation_passed=bool(sr.get("validation_passed", False)),
+                validation_type=str(
+                    sr.get("validation_type")
+                    or validation_result.get("condition", {}).get("type")
+                    or ""
+                ).strip(),
+                validation_value=str(
+                    sr.get("validation_value")
+                    or validation_result.get("condition", {}).get("value")
+                    or ""
+                ).strip(),
+                validation_source=str(sr.get("validation_source") or validation_result.get("source") or "").strip(),
+                validation_passed=bool(sr.get("validation_passed", validation_result.get("passed", False))),
+                validation_result=validation_result if isinstance(validation_result, dict) else {},
+                stale_ref_count=int(sr.get("stale_ref_count") or 0),
                 step_latency_ms=int(sr.get("step_latency_ms") or 0),
             )
             step_traces.append(trace)

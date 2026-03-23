@@ -145,7 +145,10 @@ class AgentBrowserSnapshot(TypedDict):
     Fields:
         current_url           — URL of the page at snapshot time.
         snapshot_text         — raw accessibility tree text from the CLI.
-        interactive_elements  — normalized list of interactive elements.
+        interactive_elements  — normalized list of truly interactive elements
+                                used for ref selection.
+        context_elements      — normalized list of non-interactive snapshot
+                                elements kept only for debugging / validation.
         raw_snapshot_path     — filesystem path to the saved raw JSON payload
                                 for debugging; empty string if save was skipped
                                 or failed.
@@ -154,4 +157,5 @@ class AgentBrowserSnapshot(TypedDict):
     current_url: str
     snapshot_text: str
     interactive_elements: List[AgentBrowserElement]
+    context_elements: List[AgentBrowserElement]
     raw_snapshot_path: str

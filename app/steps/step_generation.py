@@ -72,15 +72,15 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
                         },
                         "selector": {
                             "type": "string",
-                            "description": "click only: prefer [data-testid='x'] selectors.",
+                            "description": "click only: semantic selector only when no visible label is available.",
                         },
                         "text": {
                             "type": "string",
-                            "description": "click only: exact visible text when selector is not available.",
+                            "description": "Legacy click field. Leave empty when using label for visible click targets.",
                         },
                         "label": {
                             "type": "string",
-                            "description": "screenshot only: short caption for the frame.",
+                            "description": "click: exact visible button/link label. screenshot: short caption for the frame.",
                         },
                     },
                     "required": ["action", "url", "selector", "text", "label"],
@@ -311,8 +311,10 @@ async def generate_steps_from_diff(
             "3. THEN write `narration`.\n\n"
             "Rules:\n"
             "• Use ONLY routes from real_routes for goto actions.\n"
-            "• For click actions use ONLY selectors from real_buttons or data_testids "
-            "(prefer [data-testid='x']), OR the exact visible text from real_buttons / real_links.\n"
+            "• For click actions prefer the exact visible button/link label from real_buttons / real_links.\n"
+            "• Put visible click targets in `label`, not `selector` or `text`.\n"
+            "• Use `selector` only when there is no visible label and the target is available only via a semantic selector like [data-testid='x'] or [aria-label='x'].\n"
+            "• Never use raw CSS selectors like #id, .class, or DOM-structure selectors for click steps.\n"
             "• Set unused fields (url / selector / text / label) to an empty string \"\".\n"
             "• Include 1–3 navigation/click steps that reach the changed areas, "
             "each followed by a screenshot.\n"

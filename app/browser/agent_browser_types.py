@@ -27,7 +27,7 @@ Design boundaries:
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from app.dom_schema import ExperimentMode
 
@@ -149,25 +149,33 @@ class SelectionResult(TypedDict):
 ValidationSource = Literal["step", "test_case", "legacy_state_change", ""]
 
 
+ValidationConditionType = Literal["url_match", "text_present", "element_present"]
+
+
+class ValidationCondition(TypedDict):
+    """Explicit post-click validation condition for one step."""
+
+    type: ValidationConditionType
+    value: str
+
+
 class StepValidationResult(TypedDict):
     """
     Structured post-click validation result recorded by the AB runner.
 
     Fields:
-        condition_type   — validation type used for the step:
-                           "url_match" | "text_present" | "element_present" |
-                           "state_changed" | "".
-        condition_value  — expected value for structured validation, or "" for
-                           legacy state-change fallback.
-        source           — whether the validation came from the step payload,
-                           fixed test-case metadata, or legacy fallback.
-        passed           — True when the post-click page state satisfied the
-                           validation rule.
-        failure_reason   — reason string when validation failed, else "".
+        passed      — True when the post-click page state satisfied the
+                      structured validation rule.
+        condition   — structured validation condition that was checked, or None
+                      when the step ran without validation metadata.
+        actual      — concise description of the observed post-click state.
+        source      — whether the validation came from the step payload,
+                      fixed test-case metadata, or "" when unvalidated.
+        failure_reason — reason string when validation failed, else "".
     """
 
-    condition_type: str
-    condition_value: str
-    source: ValidationSource
     passed: bool
+    condition: Optional[ValidationCondition]
+    actual: str
+    source: ValidationSource
     failure_reason: str

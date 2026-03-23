@@ -144,14 +144,16 @@ def derive_intent(step: Dict[str, Any]) -> str:
     Agent Browser execution loop (Phase 3 spec: "connects planning to execution").
 
     Decision priority:
-        1. step["text"]     — visible text written by the planner; ideal for
+        1. step["label"]    — visible text written by the planner; ideal for
                                agent-browser name matching.
-        2. data-testid      — extracted from step["selector"] and converted to
+        2. step["text"]     — legacy visible text field; treated the same way.
+                               agent-browser name matching.
+        3. data-testid      — extracted from step["selector"] and converted to
                                human-readable form ("generate-api-key" →
                                "generate api key").
-        3. #id selector     — first `#foo-bar` fragment → "foo bar" for partial
+        4. #id selector     — first `#foo-bar` fragment → "foo bar" for partial
                                matching against accessible names.
-        4. ""               — intent cannot be derived; caller should treat
+        5. ""               — intent cannot be derived; caller should treat
                                this as a fatal step failure.
 
     Args:
@@ -162,6 +164,10 @@ def derive_intent(step: Dict[str, Any]) -> str:
         A non-empty intent string on success, or "" when no intent can be
         derived from the step data.
     """
+    label = (step.get("label") or "").strip()
+    if label:
+        return label
+
     text = (step.get("text") or "").strip()
     if text:
         return text
@@ -236,8 +242,8 @@ def select_ref(
         _log_result(result)
         return result
 
-    # Apply optional role filter to restrict the search pool.
-    pool = _filter_by_role(snapshot["interactive_elements"], role_filter)
+    # Selection is intentionally limited to normalized interactive elements only.
+    pool = _filter_by_role(list(snapshot["interactive_elements"]), role_filter)
 
     # ------------------------------------------------------------------
     # Level 1 — Exact case-sensitive name match

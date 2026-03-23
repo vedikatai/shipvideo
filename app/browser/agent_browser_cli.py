@@ -46,6 +46,17 @@ from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot
 # Directory for raw snapshot JSON artifacts (created on first write).
 _SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "data" / "ab_snapshots"
 
+_INTERACTIVE_ROLES = frozenset({
+    "button",
+    "link",
+    "textbox",
+    "checkbox",
+    "radio",
+    "tab",
+    "menuitem",
+    "option",
+})
+
 
 class AgentBrowserError(RuntimeError):
     """
@@ -238,7 +249,7 @@ class AgentBrowserCLI:
 
         Returns:
             AgentBrowserSnapshot with current_url, snapshot_text,
-            interactive_elements (normalized), and raw_snapshot_path.
+            interactive_elements, context_elements, and raw_snapshot_path.
         """
         args = ["snapshot"]
         if interactive:
@@ -419,6 +430,12 @@ class AgentBrowserCLI:
             visible — always True (interactive snapshot only surfaces visible
                        interactive elements)
 
+        Snapshot bucketing:
+            interactive_elements — only the allowlisted actionable roles used
+                                   by the ref selector.
+            context_elements     — everything else from the snapshot, preserved
+                                   for debugging and validation only.
+
         If refs dict is empty or missing, interactive_elements will be an
         empty list. This is a valid result (e.g. a blank page or a page with
         no interactive elements), not an error.
@@ -432,22 +449,27 @@ class AgentBrowserCLI:
         snapshot_text: str = data.get("snapshot") or result["stdout"]
 
         interactive_elements: List[AgentBrowserElement] = []
+        context_elements: List[AgentBrowserElement] = []
         for ref_id, meta in refs.items():
             if not isinstance(meta, dict):
                 continue
-            interactive_elements.append(
-                AgentBrowserElement(
-                    ref=f"@{ref_id}",
-                    role=(meta.get("role") or "").lower().strip(),
-                    name=(meta.get("name") or "").strip(),
-                    url=current_url,
-                    visible=True,
-                )
+            element = AgentBrowserElement(
+                ref=f"@{ref_id}",
+                role=(meta.get("role") or "").lower().strip(),
+                name=(meta.get("name") or "").strip(),
+                url=current_url,
+                visible=True,
             )
+            if element["role"] in _INTERACTIVE_ROLES:
+                interactive_elements.append(element)
+            else:
+                context_elements.append(element)
 
         print(
             f"[agent_browser] snapshot normalized "
-            f"elements={len(interactive_elements)} url={current_url!r}",
+            f"interactive={len(interactive_elements)} "
+            f"context={len(context_elements)} "
+            f"url={current_url!r}",
             flush=True,
         )
 
@@ -455,6 +477,7 @@ class AgentBrowserCLI:
             current_url=current_url,
             snapshot_text=snapshot_text,
             interactive_elements=interactive_elements,
+            context_elements=context_elements,
             raw_snapshot_path=raw_snapshot_path,
         )
 

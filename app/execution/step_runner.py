@@ -7,10 +7,13 @@ from typing import Any, Dict, List, Optional
 
 from playwright.sync_api import Page, sync_playwright
 
-from app.browser.agent_browser_types import StepValidationResult
+from app.browser.agent_browser_types import (
+    StepValidationResult,
+    ValidationCondition,
+)
 from app.config_types import CaptureSettings
 from app.context.dom_extractor import extract_dom_context
-from app.dom_schema import ExperimentMode, SuccessCondition
+from app.dom_schema import ExperimentMode
 from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
 from app.llm.retry_engine import regenerate_with_feedback
 from app.policy.selector_validator import validate_step_against_dom
@@ -22,7 +25,7 @@ from app.policy.selector_validator import validate_step_against_dom
 #: Maximum steps processed by run_ab_stepwise in a single invocation.
 MAX_STEPS_PER_RUN: int = 10
 
-#: Maximum per-step retry attempts for stale-ref recovery and wrong-click retry.
+#: Maximum per-step attempts for stale-ref recovery (initial try + one retry).
 MAX_RETRIES_PER_STEP: int = 2
 
 #: Minimum wait in milliseconds after any click, before re-snapshot.
@@ -57,7 +60,7 @@ def _build_metrics(
     failure_counts: Dict[str, int] = {}
     for r in results:
         outcome = (r.get("outcome") or "").strip()
-        if outcome and outcome not in ("success", "pending", "ok"):
+        if outcome and outcome not in ("success", "pending", "ok", "unvalidated"):
             failure_counts[outcome] = failure_counts.get(outcome, 0) + 1
 
     latencies = [
@@ -104,10 +107,8 @@ def _classify_final_outcome(*, success: bool, failure_reason: str = "") -> str:
         "snapshot_failed",
         "agent_browser_error",
         "wrong_click",
-        "no_match",
-        "no_intent",
-        "repeated_action",
         "stale_ref",
+        "stale_ref_unrecovered",
     )
     if reason.startswith(regression_prefixes):
         return "regressed"
@@ -121,8 +122,8 @@ def _resolve_url(base: str, path: str) -> str:
     return base.rstrip("/") + "/" + path.lstrip("/")
 
 
-def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
-    """Return a validated SuccessCondition dict, or None when invalid/missing."""
+def _normalize_validation_condition(raw: Any) -> Optional[ValidationCondition]:
+    """Return a validated ValidationCondition dict, or None when invalid/missing."""
     if not isinstance(raw, dict):
         return None
     cond_type = str(raw.get("type") or "").strip()
@@ -131,12 +132,12 @@ def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
         return None
     if not cond_value:
         return None
-    return SuccessCondition(type=cond_type, value=cond_value)
+    return ValidationCondition(type=cond_type, value=cond_value)
 
 
-def _extract_success_condition(step: Dict[str, Any]) -> Optional[SuccessCondition]:
+def _extract_validation_condition(step: Dict[str, Any]) -> Optional[ValidationCondition]:
     """Read structured click validation metadata from a step dict."""
-    return _normalize_success_condition(
+    return _normalize_validation_condition(
         step.get("success_condition") or step.get("validation_condition")
     )
 
@@ -145,8 +146,8 @@ def _contains_ci(haystack: str, needle: str) -> bool:
     return needle.lower() in haystack.lower()
 
 
-def _matches_success_condition(
-    condition: SuccessCondition,
+def _matches_validation_condition(
+    condition: ValidationCondition,
     *,
     current_url: str,
     snapshot_text: str,
@@ -164,58 +165,75 @@ def _matches_success_condition(
     return False
 
 
+def _element_names(snapshot: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    for bucket in ("interactive_elements", "context_elements"):
+        for element in snapshot.get(bucket) or []:
+            if isinstance(element, dict):
+                name = str(element.get("name") or "").strip()
+                if name:
+                    names.append(name)
+    return names
+
+
+def _describe_validation_actual(
+    condition: Optional[ValidationCondition],
+    snap_after: Dict[str, Any],
+) -> str:
+    if condition is None:
+        return "no_validation_condition"
+
+    if condition["type"] == "url_match":
+        return str(snap_after.get("current_url") or "")
+    if condition["type"] == "text_present":
+        return str(snap_after.get("snapshot_text") or "")
+
+    matched_names = [
+        name for name in _element_names(snap_after)
+        if _contains_ci(name, condition["value"])
+    ]
+    if matched_names:
+        return ", ".join(matched_names[:5])
+    all_names = _element_names(snap_after)
+    return ", ".join(all_names[:5]) if all_names else "no_matching_element"
+
+
 def _evaluate_click_validation(
     *,
     step: Dict[str, Any],
     snap_before: Dict[str, Any],
     snap_after: Dict[str, Any],
-    state_changed: bool,
 ) -> StepValidationResult:
-    """
-    Validate the post-click page state for one click step.
-
-    Priority 1 rule:
-      - explicit structured validation wins when present
-      - otherwise fall back to an explicit legacy state-change check so the
-        runner never records a silent success
-    """
-    condition = _extract_success_condition(step)
+    """Validate the post-click page state for one click step."""
+    condition = _extract_validation_condition(step)
     if condition is None:
         return StepValidationResult(
-            condition_type="state_changed",
-            condition_value="",
-            source="legacy_state_change",
-            passed=state_changed,
-            failure_reason="" if state_changed else "validation_failed:state_changed",
+            passed=False,
+            condition=None,
+            actual="no_validation_condition",
+            source="",
+            failure_reason="",
         )
 
     source = str(step.get("validation_source") or "step")
-    before_matches = _matches_success_condition(
+    before_matches = _matches_validation_condition(
         condition,
         current_url=str(snap_before.get("current_url") or ""),
         snapshot_text=str(snap_before.get("snapshot_text") or ""),
-        element_names=[
-            str(el.get("name") or "")
-            for el in (snap_before.get("interactive_elements") or [])
-            if isinstance(el, dict)
-        ],
+        element_names=_element_names(snap_before),
     )
-    after_matches = _matches_success_condition(
+    after_matches = _matches_validation_condition(
         condition,
         current_url=str(snap_after.get("current_url") or ""),
         snapshot_text=str(snap_after.get("snapshot_text") or ""),
-        element_names=[
-            str(el.get("name") or "")
-            for el in (snap_after.get("interactive_elements") or [])
-            if isinstance(el, dict)
-        ],
+        element_names=_element_names(snap_after),
     )
-    passed = after_matches and (state_changed or not before_matches)
+    passed = after_matches and not before_matches
     return StepValidationResult(
-        condition_type=condition["type"],
-        condition_value=condition["value"],
-        source=source if source in {"step", "test_case"} else "step",
         passed=passed,
+        condition=condition,
+        actual=_describe_validation_actual(condition, snap_after),
+        source=source if source in {"step", "test_case"} else "step",
         failure_reason="" if passed else f"validation_failed:{condition['type']}:{condition['value']}",
     )
 
@@ -240,6 +258,15 @@ def _is_stale_ref_error(error_message: str, click_target: str) -> bool:
     return any(marker in lowered for marker in stale_markers)
 
 
+def _discard_screenshots(paths: List[Path]) -> None:
+    for path in paths:
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+
 def _execute_one(
     page: Page,
     base_url: str,
@@ -255,7 +282,7 @@ def _execute_one(
         return True, shot_idx, None
     if action == "click":
         selector = (step.get("selector") or "").strip()
-        text = (step.get("text") or "").strip()
+        text = (step.get("label") or step.get("text") or "").strip()
         if selector:
             page.locator(selector).first.click(timeout=8000)
             return True, shot_idx, None
@@ -594,7 +621,11 @@ def run_ab_stepwise(
             if action == "click":
                 intent = derive_intent(step)
                 if not intent:
-                    step_result.update({"outcome": "no_intent", "status": "failed"})
+                    step_result.update({
+                        "outcome": "click_failed",
+                        "status": "failed",
+                        "error": "no_intent",
+                    })
                     step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
                     results.append(step_result)
                     _log("ab_runner.no_intent", {"index": step_idx, "step": step})
@@ -602,19 +633,29 @@ def run_ab_stepwise(
                         "success": False,
                         "final_outcome": _classify_final_outcome(
                             success=False,
-                            failure_reason="no_intent",
+                            failure_reason="click_failed:no_intent",
                         ),
                         "steps_succeeded": steps_succeeded,
                         "steps_failed": 1,
-                        "failure_reason": "no_intent",
+                        "failure_reason": "click_failed:no_intent",
                         "results": results,
                         "metrics": _build_metrics(results, len(initial_steps), _total_retries),
                     }
 
                 step_result["intent"] = intent
-                outcome = "pending"
+                validation_condition = _extract_validation_condition(step)
+                if validation_condition is not None:
+                    step_result["validation_condition"] = validation_condition
 
-                for attempt in range(1, max_retries_per_step + 1):
+                outcome = "click_failed"
+                attempts_used = 0
+                stale_ref_retry_used = False
+                click_attempt_limit = min(max_retries_per_step, MAX_RETRIES_PER_STEP)
+                step_result["stale_ref_count"] = 0
+
+                for attempt in range(1, click_attempt_limit + 1):
+                    attempts_used = attempt
+                    attempt_screenshots: List[Path] = []
                     _log("ab_runner.click_attempt", {
                         "index": step_idx, "attempt": attempt, "intent": intent,
                     })
@@ -625,47 +666,36 @@ def run_ab_stepwise(
                     try:
                         snap = extract_ab_context(cli, save_raw=(attempt == 1))
                     except AgentBrowserError as exc:
-                        outcome = "snapshot_failed"
-                        step_result["error"] = str(exc)
+                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                        step_result["error"] = f"snapshot_failed:{exc}"
                         _log("ab_runner.snapshot_failed", {"index": step_idx, "attempt": attempt})
                         break  # not retriable
 
                     # Deterministic ref selection.
                     sel = select_ref(intent, snap, mode=mode)  # type: ignore[arg-type]
                     step_result.update({
+                        "raw_snapshot_path": snap.get("raw_snapshot_path", ""),
                         "chosen_ref": sel["chosen_ref"],
                         "selection_reason": sel["selection_reason"],
                     })
-
-                    # If a11y name matching fails but the planner sent a CSS/XPath selector,
-                    # fall back to agent-browser click(<selector>) — the stock CLI accepts
-                    # refs (@e1), CSS, or XPath (see `agent-browser click --help`).
-                    raw_selector = (step.get("selector") or "").strip()
-                    if sel["chosen_ref"]:
-                        click_target = sel["chosen_ref"]
-                    elif sel["selection_reason"] == "no_match" and raw_selector:
-                        click_target = raw_selector
-                        step_result.update({
-                            "chosen_ref": raw_selector,
-                            "selection_reason": "css_selector_fallback",
-                        })
-                        _log("ab_runner.css_selector_fallback", {
-                            "index": step_idx, "selector": raw_selector, "intent": intent,
-                        })
-                    else:
-                        # ambiguous (or no_match with no selector) — cannot safely click.
-                        outcome = sel["selection_reason"]
+                    if not sel["chosen_ref"]:
+                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                        step_result["error"] = f"selection_failed:{sel['selection_reason']}"
                         _log("ab_runner.selection_failed", {
-                            "index": step_idx, "attempt": attempt,
-                            "reason": outcome, "intent": intent,
+                            "index": step_idx,
+                            "attempt": attempt,
+                            "reason": sel["selection_reason"],
+                            "intent": intent,
                         })
                         break
+                    click_target = sel["chosen_ref"]
 
                     # Repeat-action guard: same target on same URL without prior
                     # state change means we are stuck in a loop.
                     action_key = f"{snap['current_url']}:{click_target}"
                     if action_key == last_action_key:
-                        outcome = "repeated_action"
+                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                        step_result["error"] = "repeated_action"
                         _log("ab_runner.repeated_action", {
                             "index": step_idx,
                             "ref": click_target,
@@ -678,26 +708,41 @@ def run_ab_stepwise(
                     try:
                         cli.screenshot(before_path)
                         shot_idx += 1
+                        attempt_screenshots.append(before_path)
                         step_result["before_screenshot"] = str(before_path)
                     except AgentBrowserError:
                         pass  # non-fatal
 
-                    # Execute the click (ref @e1 or CSS/XPath from fallback).
+                    # Execute the click.
                     try:
                         cli.click(click_target)
                     except AgentBrowserError as exc:
                         error_message = str(exc)
-                        outcome = (
-                            "stale_ref"
-                            if _is_stale_ref_error(error_message, click_target)
-                            else "click_failed"
-                        )
                         step_result["error"] = error_message
-                        _log(f"ab_runner.{outcome}", {
+                        if _is_stale_ref_error(error_message, click_target):
+                            step_result["stale_ref_count"] = int(step_result.get("stale_ref_count", 0)) + 1
+                            _discard_screenshots(attempt_screenshots)
+                            _log("ab_runner.stale_ref", {
+                                "index": step_idx,
+                                "attempt": attempt,
+                                "ref": click_target,
+                                "error": error_message,
+                                "stale_ref_count": step_result["stale_ref_count"],
+                            })
+                            if stale_ref_retry_used or attempt >= click_attempt_limit:
+                                outcome = "stale_ref_unrecovered"
+                                break
+                            stale_ref_retry_used = True
+                            outcome = "stale_ref"
+                            continue
+
+                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                        _discard_screenshots(attempt_screenshots)
+                        _log("ab_runner.click_failed", {
                             "index": step_idx, "attempt": attempt,
                             "ref": click_target, "error": error_message,
                         })
-                        continue  # retry: re-snapshot will get fresh refs
+                        break
 
                     # Post-click wait: minimum 1.5 s floor to let the page settle
                     # before state-change detection and after-screenshot.
@@ -711,6 +756,7 @@ def run_ab_stepwise(
                     try:
                         cli.screenshot(after_path)
                         shot_idx += 1
+                        attempt_screenshots.append(after_path)
                         step_result["after_screenshot"] = str(after_path)
                     except AgentBrowserError:
                         pass  # non-fatal
@@ -719,8 +765,9 @@ def run_ab_stepwise(
                     try:
                         snap_after = extract_ab_context(cli, save_raw=False)
                     except AgentBrowserError as exc:
-                        outcome = "snapshot_failed"
-                        step_result["error"] = str(exc)
+                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                        step_result["error"] = f"snapshot_failed:{exc}"
+                        _discard_screenshots(attempt_screenshots)
                         break
 
                     url_before = snap["current_url"]
@@ -735,52 +782,66 @@ def run_ab_stepwise(
                         "url_after": url_after,
                         "state_changed": state_changed,
                     })
-                    last_action_key = action_key
 
                     validation = _evaluate_click_validation(
                         step=step,
                         snap_before=snap,
                         snap_after=snap_after,
-                        state_changed=state_changed,
                     )
+                    condition = validation["condition"]
                     step_result.update({
-                        "validation_type": validation["condition_type"],
-                        "validation_value": validation["condition_value"],
+                        "validation_result": validation,
+                        "validation_type": condition["type"] if condition else "",
+                        "validation_value": condition["value"] if condition else "",
                         "validation_source": validation["source"],
                         "validation_passed": validation["passed"],
+                        "validation_actual": validation["actual"],
                     })
+
+                    if condition is None:
+                        outcome = "unvalidated"
+                        last_action_key = action_key
+                        _log("ab_runner.unvalidated", {
+                            "index": step_idx,
+                            "attempt": attempt,
+                            "ref": click_target,
+                        })
+                        break
 
                     if validation["passed"]:
                         outcome = "success"
+                        last_action_key = action_key
                         _log("ab_runner.validation_passed", {
                             "index": step_idx, "attempt": attempt,
                             "url_before": url_before,
                             "url_after": url_after,
-                            "validation_type": validation["condition_type"],
+                            "validation_type": condition["type"],
                             "validation_source": validation["source"],
                         })
                         break
-                    else:
-                        outcome = "wrong_click"
-                        step_result["validation_failure_reason"] = validation["failure_reason"]
-                        _log("ab_runner.wrong_click", {
-                            "index": step_idx, "attempt": attempt,
-                            "ref": click_target,
-                            "intent": intent,
-                            "validation_type": validation["condition_type"],
-                            "validation_failure_reason": validation["failure_reason"],
-                        })
-                        # Retry: re-snapshot may reveal updated element tree.
+                    outcome = "wrong_click"
+                    step_result["validation_failure_reason"] = validation["failure_reason"]
+                    _discard_screenshots(attempt_screenshots)
+                    _log("ab_runner.wrong_click", {
+                        "index": step_idx, "attempt": attempt,
+                        "ref": click_target,
+                        "intent": intent,
+                        "validation_type": condition["type"],
+                        "validation_failure_reason": validation["failure_reason"],
+                    })
+                    break
 
                 # End of retry loop.
-                _total_retries += attempt - 1  # Phase 4: retries = attempts − 1
+                _total_retries += max(attempts_used - 1, 0)
                 step_result["outcome"] = outcome
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
 
                 # Fatal outcomes: stop the run immediately.
                 _FATAL_OUTCOMES = frozenset({
-                    "no_match", "ambiguous", "repeated_action",
-                    "click_failed", "snapshot_failed", "no_intent", "stale_ref", "wrong_click",
+                    "click_failed",
+                    "stale_ref",
+                    "stale_ref_unrecovered",
+                    "wrong_click",
                 })
                 if outcome in _FATAL_OUTCOMES:
                     step_result["status"] = "failed"
@@ -806,10 +867,22 @@ def run_ab_stepwise(
             # ------------------------------------------------------------------
             # Unknown action — skip with warning; never fatal
             # ------------------------------------------------------------------
-            step_result.update({"outcome": f"unknown_action:{action}", "status": "ok"})
+            step_result.update({"outcome": "click_failed", "status": "failed", "error": f"unknown_action:{action}"})
             step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
             _log("ab_runner.unknown_action", {"index": step_idx, "action": action})
             results.append(step_result)
+            return {
+                "success": False,
+                "final_outcome": _classify_final_outcome(
+                    success=False,
+                    failure_reason=f"click_failed:unknown_action:{action}",
+                ),
+                "steps_succeeded": steps_succeeded,
+                "steps_failed": 1,
+                "failure_reason": f"click_failed:unknown_action:{action}",
+                "results": results,
+                "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+            }
 
     except AgentBrowserError as exc:
         _log("ab_runner.fatal_error", {"error": str(exc)})
