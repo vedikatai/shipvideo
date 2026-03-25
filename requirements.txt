@@ -18,3 +18,4 @@ openai
 # Observability (MVP: tracing with ConsoleSpanExporter only)
 opentelemetry-api
 opentelemetry-sdk
+opentelemetry-exporter-otlp
