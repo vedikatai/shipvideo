@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Tuple
+import asyncio
+from typing import Any, Dict, List, Tuple, Optional
 
 from app.llm_guards import record_spend
 
@@ -182,4 +183,98 @@ def generate_next_steps(
     if not steps:
         raise RuntimeError("generate_next_steps: LLM returned empty steps via both response_format modes")
     return steps
+
+
+def _call_llm_simple(prompt: str) -> str:
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    if not deployment:
+        return ""
+    try:
+        client = _get_client()
+        completion = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=120,
+            response_format={"type": "text"},
+        )
+        usage = getattr(completion, "usage", None)
+        pt = getattr(usage, "prompt_tokens", 0) or 0
+        ct = getattr(usage, "completion_tokens", 0) or 0
+        record_spend(pt, ct)
+        return str(completion.choices[0].message.content or "")
+    except Exception:
+        return ""
+
+
+async def find_ref_with_llm(
+    *,
+    intent: str,
+    interactive_elements: List[Dict[str, Any]],
+    context_elements: List[Dict[str, Any]] | None = None,
+) -> Optional[str]:
+    """
+    Mode B helper: recover a ref when deterministic ref selection returns no_match.
+
+    Returns:
+        A valid ref (e.g. "@e12") from the provided interactive elements, or ""
+        when no safe recovery is possible.
+    """
+    if not intent or not interactive_elements:
+        return None
+
+    compact_interactive = [
+        {"ref": str(e.get("ref") or ""), "role": str(e.get("role") or ""), "name": str(e.get("name") or "")}
+        for e in interactive_elements
+        if str(e.get("ref") or "").strip()
+    ]
+    if not compact_interactive:
+        return None
+
+    elements_text = "\n".join(
+        [
+            f"ref={el.get('ref')} role={el.get('role')} name={el.get('name')}"
+            for el in compact_interactive
+        ]
+    )
+    prompt = f"""
+You are selecting a UI element to click.
+
+Intent: "{intent}"
+
+Available interactive elements:
+{elements_text}
+
+Return only the ref string (e.g. "e10") of the best matching element.
+If no element matches the intent, return "none".
+No prose. No explanation. Just the ref or "none".
+"""
+    response = _call_llm_simple(prompt)
+    ref = (response or "").strip().strip('"').strip("'")
+    if not ref or ref.lower() == "none":
+        return None
+    if not ref.startswith("@"):
+        ref = f"@{ref}"
+    valid_refs = {str(e.get("ref") or "").strip() for e in compact_interactive}
+    if ref in valid_refs:
+        return ref
+    return None
+
+
+def find_ref_with_llm_sync(
+    *,
+    intent: str,
+    interactive_elements: List[Dict[str, Any]],
+    context_elements: List[Dict[str, Any]] | None = None,
+) -> str:
+    try:
+        return asyncio.run(
+            find_ref_with_llm(
+                intent=intent,
+                interactive_elements=interactive_elements,
+                context_elements=context_elements,
+            )
+        ) or ""
+    except RuntimeError:
+        # Fallback when called under an existing event loop.
+        return ""
 

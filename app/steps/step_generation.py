@@ -1,12 +1,16 @@
+# app/steps/step_generation.py — full file, replace entirely
+
 """
 Step generation: produce a grounded list of capture steps (and narration) from
 PR diff + live DOM.
 
-This implements production-grade correctness:
-- Structured output (JSON schema) when supported by the Azure deployment.
-- DOM-grounded hard validation: we drop steps whose routes/selectors/text do
-  not exist in the live crawl.
-- Deterministic fallbacks on budget/size/API errors.
+Changes from previous version:
+- Two-phase LLM: extraction call first, planning call second.
+- validate_against_dom now annotates instead of dropping click steps.
+- preflight_gate blocks invalid plans before browser opens.
+- One replan attempt when preflight fails, then ContractIntegrityError.
+- normalize_steps bug fixed: validation metadata now actually preserved.
+- assert_terminal injected into last click when contract has terminal condition.
 """
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ import fnmatch
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.steps.dom_crawler import crawl_dom_data
+from app.steps.preflight import preflight_gate
 from app.llm_guards import (
     check_budget,
     estimate_run_cost,
@@ -34,6 +39,17 @@ from app.config import load_config
 from observability import pipeline_step
 
 try:
+    from app.steps.errors import ContractIntegrityError
+except ImportError:
+    ContractIntegrityError = RuntimeError  # type: ignore
+
+try:
+    from observability.tracing import record_contract_integrity_error
+except ImportError:
+    def record_contract_integrity_error(*a, **kw) -> None:  # type: ignore
+        pass
+
+try:
     from openai import OpenAI, BadRequestError  # type: ignore
 except Exception:
     OpenAI = None  # type: ignore
@@ -41,6 +57,38 @@ except Exception:
 
 FALLBACK_STEPS: List[Dict[str, Any]] = [{"action": "screenshot"}]
 
+
+# ------------------------------------------------------------------ #
+# JSON schemas                                                         #
+# ------------------------------------------------------------------ #
+
+_EXTRACTION_JSON_SCHEMA: Dict[str, Any] = {
+    "name": "extraction",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "start_route": {
+                "type": "string",
+                "description": "The route path where the demo should begin, e.g. '/settings'.",
+            },
+            "terminal_testid": {
+                "type": "string",
+                "description": (
+                    "The data-testid or element id that confirms the flow is complete, "
+                    "e.g. 'recharge-success'. Empty string if not found."
+                ),
+            },
+            "click_labels": {
+                "type": "array",
+                "description": "Ordered visible button/link labels the user must click through.",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["start_route", "terminal_testid", "click_labels"],
+        "additionalProperties": False,
+    },
+}
 
 _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
     "name": "demo_flow",
@@ -51,9 +99,8 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
             "suggested_demo_flow": {
                 "type": "string",
                 "description": (
-                    "2–3 sentence natural language narrative of the ideal demo session "
-                    "(e.g. 'User navigates to billing, clicks Upgrade, sees confirmation modal'). "
-                    "Written BEFORE steps to act as the guiding narrative for script generation."
+                    "2-3 sentence natural language narrative of the ideal demo session. "
+                    "Written BEFORE steps to act as the guiding narrative."
                 ),
             },
             "steps": {
@@ -64,30 +111,40 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["goto", "click", "screenshot"],
+                            "enum": ["goto", "click", "screenshot", "assert_terminal"],
                         },
                         "url": {
                             "type": "string",
-                            "description": "goto only: route path (e.g. '/billing').",
+                            "description": "goto only: route path.",
                         },
                         "selector": {
                             "type": "string",
-                            "description": "click only: semantic selector only when no visible label is available.",
+                            "description": "click only: semantic selector when no visible label.",
                         },
                         "text": {
                             "type": "string",
-                            "description": "Legacy click field. Leave empty when using label for visible click targets.",
+                            "description": "Legacy click field. Use label instead.",
                         },
                         "label": {
                             "type": "string",
-                            "description": "click: exact visible button/link label. screenshot: short caption for the frame.",
+                            "description": "click: exact visible label. screenshot: caption.",
+                        },
+                        "expected_element": {
+                            "type": "string",
+                            "description": "assert_terminal only: data-testid or id to confirm.",
                         },
                     },
-                    "required": ["action", "url", "selector", "text", "label"],
+                    "required": [
+                        "action", "url", "selector",
+                        "text", "label", "expected_element",
+                    ],
                     "additionalProperties": False,
                 },
             },
-            "narration": {"type": "string", "description": "1–2 sentence script narrating the demo."},
+            "narration": {
+                "type": "string",
+                "description": "1-2 sentence script narrating the demo.",
+            },
         },
         "required": ["suggested_demo_flow", "steps", "narration"],
         "additionalProperties": False,
@@ -95,42 +152,57 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
 }
 
 
+# ------------------------------------------------------------------ #
+# LLM caller                                                           #
+# ------------------------------------------------------------------ #
+
 def _call_llm(
     client: Any,
     model: str,
     messages: List[Dict[str, str]],
     max_completion_tokens: int,
+    *,
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """
     Call Azure OpenAI with structured output.
-
-    If `json_schema` is unsupported by the deployment, retry with `json_object`
-    and do minimal extraction.
+    Falls back to json_object if json_schema is unsupported.
     """
+    schema = response_schema or _DEMO_FLOW_JSON_SCHEMA
     try:
         completion = client.chat.completions.create(
             model=model,
             messages=messages,
             max_completion_tokens=max_completion_tokens,
-            response_format={"type": "json_schema", "json_schema": _DEMO_FLOW_JSON_SCHEMA},
+            response_format={"type": "json_schema", "json_schema": schema},
         )
         content = completion.choices[0].message.content or "{}"
-        print("[steps.step_generation] response_mode=json_schema", flush=True)
+        print(
+            f"[steps.step_generation] response_mode=json_schema "
+            f"schema={schema.get('name', '?')}",
+            flush=True,
+        )
         return completion, json.loads(content)
     except BadRequestError as e:
         print(
-            f"[steps.step_generation] json_schema unsupported ({type(e).__name__}); retrying json_object",
+            f"[steps.step_generation] json_schema unsupported ({type(e).__name__}); "
+            f"retrying json_object",
             flush=True,
         )
     except Exception as e:
         err_str = str(e).lower()
         is_format_error = any(
-            kw in err_str for kw in ("json_schema", "response_format", "unsupported", "invalid_request_error")
+            kw in err_str
+            for kw in (
+                "json_schema", "response_format",
+                "unsupported", "invalid_request_error",
+            )
         )
         if not is_format_error:
             raise
         print(
-            f"[steps.step_generation] json_schema mode failed ({type(e).__name__}); retrying json_object",
+            f"[steps.step_generation] json_schema failed ({type(e).__name__}); "
+            f"retrying json_object",
             flush=True,
         )
 
@@ -143,10 +215,116 @@ def _call_llm(
     content = (completion.choices[0].message.content or "{}").strip()
     start, end = content.find("{"), content.rfind("}")
     if start != -1 and end > start:
-        content = content[start : end + 1]
+        content = content[start: end + 1]
     print("[steps.step_generation] response_mode=json_object (fallback)", flush=True)
     return completion, json.loads(content)
 
+
+# ------------------------------------------------------------------ #
+# Extraction phase                                                     #
+# ------------------------------------------------------------------ #
+
+def _run_extraction_phase(
+    client: Any,
+    model: str,
+    diff_text: str,
+    pr_title: Optional[str],
+    contract: Optional[Any],
+    max_tokens: int,
+) -> Tuple[Dict[str, Any], float]:
+    """
+    Phase 1: extract start_route, terminal_testid, click_labels from diff only.
+    Returns (extraction_data, cost_usd).
+    """
+    # If contract already has high-confidence data, skip LLM extraction
+    if contract is not None:
+        try:
+            if (
+                getattr(contract, "confidence", "low") in ("high", "medium")
+                and getattr(contract, "targets", None)
+            ):
+                labels = [t.label for t in contract.targets if t.label]
+                terminal = getattr(contract.terminal, "value", "") if contract.terminal else ""
+                print(
+                    "[steps.step_generation] extraction skipped — "
+                    "using existing high-confidence contract",
+                    flush=True,
+                )
+                return {
+                    "start_route": getattr(contract, "start_route", ""),
+                    "terminal_testid": terminal,
+                    "click_labels": labels,
+                }, 0.0
+        except Exception:
+            pass
+
+    extraction_system = (
+        "You are a code parser. "
+        "Given a PR diff, extract exactly three things and return only JSON. "
+        "No prose. No markdown. JSON only.\n\n"
+        "Rules:\n"
+        "- start_route: the new or modified route path the feature lives at.\n"
+        "- terminal_testid: the data-testid or id on the element that confirms "
+        "the flow completed (look for words like complete, success, done, finish). "
+        "Empty string if not found.\n"
+        "- click_labels: ordered list of exact visible button/link text the user "
+        "must click to complete the flow. Extract from JSX button/link text only."
+    )
+
+    # Include contract hints if partially available
+    contract_hint = ""
+    if contract is not None:
+        try:
+            existing_labels = [
+                t.label for t in (contract.targets or []) if t.label
+            ]
+            if existing_labels:
+                contract_hint = (
+                    f"\n\nKnown click targets (confirm or correct these): "
+                    f"{json.dumps(existing_labels)}"
+                )
+        except Exception:
+            pass
+
+    extraction_user = json.dumps(
+        {
+            "pr_title": pr_title or "",
+            "diff_files": diff_text,
+        },
+        ensure_ascii=False,
+    ) + contract_hint
+
+    messages = [
+        {"role": "system", "content": extraction_system},
+        {"role": "user", "content": extraction_user},
+    ]
+
+    completion, data = _call_llm(
+        client, model, messages, max_tokens,
+        response_schema=_EXTRACTION_JSON_SCHEMA,
+    )
+
+    cost = 0.0
+    usage = getattr(completion, "usage", None)
+    if usage is not None:
+        pt = getattr(usage, "prompt_tokens", 0) or 0
+        ct = getattr(usage, "completion_tokens", 0) or 0
+        record_spend(pt, ct)
+        cost = round(estimate_run_cost(pt, ct), 4)
+
+    print(
+        f"[steps.step_generation] extraction: "
+        f"start_route={data.get('start_route')!r} "
+        f"terminal={data.get('terminal_testid')!r} "
+        f"labels={data.get('click_labels')}",
+        flush=True,
+    )
+    return data, cost
+
+
+# ------------------------------------------------------------------ #
+# Helpers                                                              #
+# ------------------------------------------------------------------ #
 
 def _fallback_narration(pr_title: Optional[str]) -> str:
     if pr_title:
@@ -154,27 +332,222 @@ def _fallback_narration(pr_title: Optional[str]) -> str:
     return "Demo screenshot for this pull request."
 
 
-def _ensure_screenshots_for_visited_pages(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Ensure the flow captures evidence after each visited/interaction state.
-
-    Rule:
-    - After every `goto` or `click`, ensure a `screenshot` step follows immediately
-      unless one already exists as the next action.
-    """
+def _ensure_screenshots_for_visited_pages(
+    steps: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for i, step in enumerate(steps):
         out.append(step)
         action = step.get("action")
         if action not in {"goto", "click"}:
             continue
-        next_action = (steps[i + 1].get("action") if i + 1 < len(steps) and isinstance(steps[i + 1], dict) else None)
+        next_action = (
+            steps[i + 1].get("action")
+            if i + 1 < len(steps) and isinstance(steps[i + 1], dict)
+            else None
+        )
         if next_action == "screenshot":
             continue
-        auto_label = "Auto-captured state after navigation" if action == "goto" else "Auto-captured state after interaction"
+        auto_label = (
+            "Auto-captured state after navigation"
+            if action == "goto"
+            else "Auto-captured state after interaction"
+        )
         out.append({"action": "screenshot", "label": auto_label})
     return out
 
+
+def _inject_terminal_assertion(
+    steps: List[Dict[str, Any]],
+    contract: Optional[Any],
+) -> List[Dict[str, Any]]:
+    """
+    Inject an assert_terminal step after the last click if:
+    - contract has a terminal condition
+    - no assert_terminal step already exists
+    """
+    if contract is None:
+        return steps
+
+    terminal = getattr(contract, "terminal", None)
+    if not terminal:
+        return steps
+
+    has_terminal = any(s.get("action") == "assert_terminal" for s in steps)
+    if has_terminal:
+        return steps
+
+    # Find last click step and insert assert_terminal after it
+    last_click_idx = None
+    for i in range(len(steps) - 1, -1, -1):
+        if steps[i].get("action") == "click":
+            last_click_idx = i
+            break
+
+    terminal_step = {
+        "action": "assert_terminal",
+        "condition": {
+            "type": getattr(terminal, "type", "element_present"),
+            "value": getattr(terminal, "value", ""),
+        },
+        "expected_element": getattr(terminal, "value", ""),
+    }
+
+    if last_click_idx is not None:
+        return (
+            steps[: last_click_idx + 1]
+            + [terminal_step]
+            + steps[last_click_idx + 1 :]
+        )
+
+    return steps + [terminal_step]
+
+
+def _inject_click_validation_from_terminal(
+    steps: List[Dict[str, Any]],
+    contract: Optional[Any],
+) -> List[Dict[str, Any]]:
+    """
+    Attach validation_condition to the last click before terminal assertion.
+
+    This lets run_ab_stepwise detect wrong clicks immediately instead of only
+    failing at the final assert_terminal step.
+    """
+    if contract is None:
+        return steps
+    terminal = getattr(contract, "terminal", None)
+    if not terminal:
+        return steps
+
+    term_type = str(getattr(terminal, "type", "") or "").strip()
+    term_value = str(getattr(terminal, "value", "") or "").strip()
+    if not term_type or not term_value:
+        return steps
+
+    term_index = None
+    for i, s in enumerate(steps):
+        if s.get("action") == "assert_terminal":
+            term_index = i
+            break
+
+    search_upto = term_index if term_index is not None else len(steps)
+    last_click_idx = None
+    for i in range(search_upto - 1, -1, -1):
+        if steps[i].get("action") == "click":
+            last_click_idx = i
+            break
+    if last_click_idx is None:
+        return steps
+
+    validation_condition = {"type": term_type, "value": term_value}
+    updated = list(steps)
+    click_step = dict(updated[last_click_idx])
+    click_step["validation_condition"] = validation_condition
+    click_step.setdefault("success_condition", validation_condition)
+    click_step["validation_source"] = "contract"
+    updated[last_click_idx] = click_step
+    return updated
+
+
+def _build_planning_prompt(
+    pr_title: Optional[str],
+    extraction: Dict[str, Any],
+    real_routes: List[str],
+    real_buttons: List[Any],
+    real_links: List[Any],
+    real_inputs: List[Any],
+    real_data_testids: List[Any],
+    diff_text: str,
+    app_hints_text: str,
+    preflight_errors: Optional[List[str]] = None,
+) -> Tuple[str, str]:
+    """Build system + user messages for the planning LLM call."""
+
+    extraction_block = ""
+    if extraction:
+        lines = ["=== EXTRACTED JOURNEY FACTS ==="]
+        lines.append("These are extracted from the changed code. Trust them.")
+        lines.append("")
+        if extraction.get("start_route"):
+            lines.append(f"START ROUTE: {extraction['start_route']}")
+        if extraction.get("terminal_testid"):
+            lines.append(
+                f"TERMINAL CONDITION: element_present = "
+                f"\"{extraction['terminal_testid']}\""
+            )
+            lines.append(
+                "The flow is NOT complete until this element is present. "
+                "Do NOT stop before it."
+            )
+        if extraction.get("click_labels"):
+            lines.append("EXPECTED CLICK TARGETS IN ORDER:")
+            for lbl in extraction["click_labels"]:
+                lines.append(f'  - "{lbl}"')
+            lines.append("Use these exact label strings for click steps.")
+        lines.append("=== END EXTRACTED FACTS ===")
+        extraction_block = "\n".join(lines)
+
+    preflight_block = ""
+    if preflight_errors:
+        lines = ["=== PREVIOUS ATTEMPT FAILED PRE-FLIGHT — FIX THESE ==="]
+        for err in preflight_errors:
+            lines.append(f"  - {err}")
+        lines.append(
+            "You MUST fix every issue above. "
+            "Do not omit any required click target. "
+            "Do not stop before the terminal condition."
+        )
+        lines.append("=== END PRE-FLIGHT ERRORS ===")
+        preflight_block = "\n".join(lines)
+
+    hints_block = f"\nApp hints:\n{app_hints_text}\n" if app_hints_text else ""
+
+    system_msg = (
+        "You are a demo-flow generator for pull requests.\n"
+        "Given extracted journey facts and a live DOM snapshot, "
+        "produce a UI walkthrough that showcases the changed functionality.\n\n"
+        + (extraction_block + "\n\n" if extraction_block else "")
+        + (preflight_block + "\n\n" if preflight_block else "")
+        + "Output order:\n"
+        "1. FIRST write `suggested_demo_flow`: 2-3 sentence narrative.\n"
+        "2. THEN generate `steps` following the narrative.\n"
+        "3. THEN write `narration`.\n\n"
+        "RULES — DO NOT VIOLATE:\n"
+        "• First step must be goto to START ROUTE.\n"
+        "• Every label in EXPECTED CLICK TARGETS must appear as a click step.\n"
+        "• Do not stop until TERMINAL CONDITION is reachable.\n"
+        "• Last meaningful step must be assert_terminal with the terminal condition.\n"
+        "• Use ONLY routes from real_routes for goto.\n"
+        "• For click steps use exact visible label from real_buttons/real_links.\n"
+        "• Put visible targets in `label`, not `selector` or `text`.\n"
+        "• Use `selector` only for [data-testid='x'] or [aria-label='x'] targets.\n"
+        "• Never use raw CSS selectors like #id or .class.\n"
+        "• Set unused fields to empty string \"\".\n"
+        "• Always include at least one screenshot step.\n"
+        "• Keep narration concise (1-2 sentences).\n"
+        + hints_block
+    )
+
+    user_msg = json.dumps(
+        {
+            "title": pr_title,
+            "real_routes": real_routes,
+            "real_buttons": real_buttons,
+            "real_links": real_links,
+            "real_inputs": real_inputs,
+            "data_testids": real_data_testids,
+            # Include budgeted diff for context but not as primary signal
+            "diff_summary": diff_text[:2000] if diff_text else "",
+        },
+        ensure_ascii=False,
+    )
+
+    return system_msg, user_msg
+
+
+# ------------------------------------------------------------------ #
+# Main entry point                                                     #
+# ------------------------------------------------------------------ #
 
 @pipeline_step("step_generation")
 async def generate_steps_from_diff(
@@ -187,21 +560,24 @@ async def generate_steps_from_diff(
     contract: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
-    Generates capture steps and narration from PR diff + live DOM using Azure OpenAI.
+    Two-phase step generation:
+    Phase 1 — extraction LLM call: start_route, terminal_testid, click_labels.
+    Phase 2 — planning LLM call: full step list grounded in extraction + DOM.
 
-    Phase: DOM crawl → build prompt (diff + grounded routes/buttons/links/inputs/testids)
-    → LLM → parse JSON → validate + normalize steps.
-
-    Returns:
-        Dict with keys: steps, narration, llm_cost_usd; optionally budget_exceeded.
+    Pre-flight gate validates plan against contract before returning.
+    One replan attempt on pre-flight failure. ContractIntegrityError on second failure.
     """
     fallback_narration = _fallback_narration(pr_title)
+    total_cost = 0.0
 
     try:
         print("[steps.step_generation] generating steps from diff", flush=True)
 
         if not check_budget():
-            print("[steps.step_generation] budget limit reached; using fallback steps", flush=True)
+            print(
+                "[steps.step_generation] budget limit reached; using fallback",
+                flush=True,
+            )
             return {
                 "steps": FALLBACK_STEPS,
                 "narration": fallback_narration,
@@ -215,24 +591,18 @@ async def generate_steps_from_diff(
         if start_route and start_route != "/":
             allowed_routes_override = {start_route}
 
-        # ------------------------------------------------------------------
-        # Compute seed_routes BEFORE crawl (Phase 3): multi-route BFS visits
-        # diff-relevant pages first, so LLM never hallucinates selectors for
-        # routes it hasn't seen.
-        # ------------------------------------------------------------------
+        # ---------------------------------------------------------- #
+        # Config + seed routes                                         #
+        # ---------------------------------------------------------- #
         config = load_config()
         route_map: Dict[str, Any] = config.get("routeMap") or {}
         app_hints: Any = config.get("appHints") or ""
 
         seed_routes: List[str] = []
-        mapped_routes: set[str] = set()
+        mapped_routes: set = set()
 
-        # When general_demo=True skip feature-route seeding; homepage-only crawl.
         if not general_demo:
-            # 1. Diff-inferred routes (highest priority — directly changed pages)
             diff_seed = sorted(_extract_routes_from_diff(diff_files))
-
-            # 2. routeMap-mapped routes (config-declared feature routes)
             for f in diff_files:
                 fpath = f.get("path") or ""
                 for pattern, routes in route_map.items():
@@ -247,38 +617,37 @@ async def generate_steps_from_diff(
                                 if isinstance(r, str) and r.strip():
                                     mapped_routes.add(r.strip())
 
-            # Merge: diff-inferred first, then routeMap (deduped, order-preserving)
-            _seen_seeds: set = set()
+            _seen: set = set()
             for r in diff_seed + sorted(mapped_routes):
-                if r not in _seen_seeds:
-                    _seen_seeds.add(r)
+                if r not in _seen:
+                    _seen.add(r)
                     seed_routes.append(r)
 
-        # When start_route restricts the demo to one route, restrict the crawl
-        # too.  Otherwise the LLM receives buttons from irrelevant routes while
-        # real_routes only lists the override route — an inconsistent context
-        # that degrades selector grounding.
         if allowed_routes_override:
             seed_routes = [r for r in seed_routes if r in allowed_routes_override]
 
+        # ---------------------------------------------------------- #
+        # DOM crawl                                                    #
+        # ---------------------------------------------------------- #
         dom_data = await crawl_dom_data(staging_url, seed_routes=seed_routes)
         real_routes = dom_data.get("routes") or ["/"]
 
-        # Ensure routeMap-mapped routes appear in the LLM route list even if
-        # max_routes was hit and the crawler didn't visit all of them.
         if not general_demo and mapped_routes:
-            dom_data["routes"] = list(set((dom_data.get("routes") or []) + list(mapped_routes)))
+            dom_data["routes"] = list(
+                set((dom_data.get("routes") or []) + list(mapped_routes))
+            )
             real_routes = dom_data["routes"]
 
-        # Normalize hints into a string for prompt injection.
         if isinstance(app_hints, dict):
-            app_hints_text = "\n".join([f"- {k}: {v}" for k, v in app_hints.items()])
+            app_hints_text = "\n".join(
+                [f"- {k}: {v}" for k, v in app_hints.items()]
+            )
         else:
             app_hints_text = str(app_hints or "").strip()
 
         if allowed_routes_override:
-            # Restrict prompt to the chosen route(s).
             real_routes = list(allowed_routes_override | {"/"})
+
         real_buttons = dom_data.get("buttons") or []
         real_links = dom_data.get("links") or []
         real_inputs = dom_data.get("inputs") or []
@@ -298,156 +667,217 @@ async def generate_steps_from_diff(
                 "llm_cost_usd": 0.0,
             }
 
-        hints_block = f"\nApp hints:\n{app_hints_text}\n" if app_hints_text else ""
-
-        system_msg = (
-            "You are a demo-flow generator for pull requests.\n"
-            "Given a PR diff and a live DOM snapshot of the staging preview, "
-            "produce a short UI walkthrough that showcases the changed functionality.\n\n"
-            "Output order matters:\n"
-            "1. FIRST write `suggested_demo_flow`: a 2–3 sentence natural language narrative "
-            "describing what the ideal demo session looks like (e.g. 'User opens the billing page, "
-            "clicks Upgrade, and sees the confirmation modal'). This narrative guides script generation.\n"
-            "2. THEN generate `steps` following the narrative.\n"
-            "3. THEN write `narration`.\n\n"
-            "Rules:\n"
-            "• Use ONLY routes from real_routes for goto actions.\n"
-            "• For click actions prefer the exact visible button/link label from real_buttons / real_links.\n"
-            "• Put visible click targets in `label`, not `selector` or `text`.\n"
-            "• Use `selector` only when there is no visible label and the target is available only via a semantic selector like [data-testid='x'] or [aria-label='x'].\n"
-            "• Never use raw CSS selectors like #id, .class, or DOM-structure selectors for click steps.\n"
-            "• Set unused fields (url / selector / text / label) to an empty string \"\".\n"
-            "• Include 1–3 navigation/click steps that reach the changed areas, "
-            "each followed by a screenshot.\n"
-            "• Always include at least one screenshot step.\n"
-            "• Keep narration concise (1–2 sentences).\n"
-            + hints_block
-        )
-
-        user_msg = json.dumps(
-            {
-                "title": pr_title,
-                "diff_files": diff_text,
-                "real_routes": real_routes,
-                "real_buttons": real_buttons,
-                "real_links": real_links,
-                "real_inputs": real_inputs,
-                "data_testids": real_data_testids,
-            },
-            ensure_ascii=False,
-        )
-
-        messages = [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg},
-        ]
-
+        # ---------------------------------------------------------- #
+        # Azure client                                                 #
+        # ---------------------------------------------------------- #
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         azure_key = os.getenv("AZURE_OPENAI_API_KEY")
         azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
         if not (OpenAI and azure_endpoint and azure_key and azure_deployment):
             raise RuntimeError("Azure OpenAI is not configured correctly")
 
-        print("[steps.step_generation] using Azure OpenAI backend", flush=True)
         base_url = azure_endpoint.rstrip("/")
         if not base_url.endswith("openai/v1"):
             base_url = base_url + "/openai/v1/"
-
         client = OpenAI(base_url=base_url, api_key=azure_key)
 
-        completion, data = _call_llm(
+        # ---------------------------------------------------------- #
+        # Phase 1: Extraction                                          #
+        # ---------------------------------------------------------- #
+        extraction, extraction_cost = _run_extraction_phase(
             client,
             azure_deployment,
-            messages,
+            diff_text,
+            pr_title,
+            contract,
             get_max_completion_tokens(),
         )
+        total_cost += extraction_cost
 
-        usage = getattr(completion, "usage", None)
-        llm_cost_usd = 0.0
-        if usage is not None:
-            pt = getattr(usage, "prompt_tokens", 0) or 0
-            ct = getattr(usage, "completion_tokens", 0) or 0
-            record_spend(pt, ct)
-            llm_cost_usd = round(estimate_run_cost(pt, ct), 4)
+        # Override start_route from extraction if not explicitly provided
+        if not start_route and extraction.get("start_route"):
+            start_route = extraction["start_route"].strip()
+            if start_route and start_route != "/":
+                allowed_routes_override = {start_route}
 
-        steps = data.get("steps") or FALLBACK_STEPS
+        # ---------------------------------------------------------- #
+        # Phase 2: Planning (with optional replan on preflight fail)   #
+        # ---------------------------------------------------------- #
+        preflight_errors: Optional[List[str]] = None
 
-        if not any(
-            isinstance(s, dict) and s.get("action") == "screenshot" for s in steps
-        ):
-            print("[steps.step_generation] adding fallback screenshot step", flush=True)
-            steps.append({"action": "screenshot"})
-
-        # If we were told to start from a specific route, make sure we navigate
-        # there before executing any clicks in capture.
-        if start_route and start_route != "/":
-            goto_step = {
-                "action": "goto",
-                "url": start_route,
-                "selector": "",
-                "text": "",
-                "label": "",
-            }
-            if not steps or steps[0].get("action") != "goto" or (steps[0].get("url") or "").strip() != start_route:
-                steps = [goto_step] + steps
-
-        dom_grounded = validate_against_dom(
-            steps,
-            dom_data,
-            diff_files,
-            allowed_routes_override=allowed_routes_override,
-        )
-
-        validated = validate_steps(dom_grounded)
-        if not validated:
-            validated = FALLBACK_STEPS
-        normalized = normalize_steps(validated)
-        if not normalized:
-            normalized = FALLBACK_STEPS
-        normalized = _ensure_screenshots_for_visited_pages(normalized)
-
-        # Integrity check: warn when normalization drops validation metadata.
-        # With _PASSTHROUGH_FIELDS now preserved this should never fire,
-        # but the check makes regressions immediately visible in logs.
-        _norm_click_idx = 0
-        for raw_step in validated:
-            if raw_step.get("action") != "click":
-                continue
-            raw_has_validation = bool(
-                raw_step.get("success_condition") or raw_step.get("validation_condition")
+        for attempt in range(2):
+            system_msg, user_msg = _build_planning_prompt(
+                pr_title=pr_title,
+                extraction=extraction,
+                real_routes=real_routes,
+                real_buttons=real_buttons,
+                real_links=real_links,
+                real_inputs=real_inputs,
+                real_data_testids=real_data_testids,
+                diff_text=diff_text,
+                app_hints_text=app_hints_text,
+                preflight_errors=preflight_errors,
             )
-            if raw_has_validation:
-                # Find the corresponding normalized click step by order.
-                norm_clicks = [
-                    s for s in normalized if s.get("action") == "click"
-                ]
-                norm_step = norm_clicks[_norm_click_idx] if _norm_click_idx < len(norm_clicks) else None
-                norm_has_validation = bool(
-                    norm_step and (
-                        norm_step.get("success_condition") or norm_step.get("validation_condition")
-                    )
+
+            messages = [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ]
+
+            completion, data = _call_llm(
+                client,
+                azure_deployment,
+                messages,
+                get_max_completion_tokens(),
+                response_schema=_DEMO_FLOW_JSON_SCHEMA,
+            )
+
+            usage = getattr(completion, "usage", None)
+            if usage is not None:
+                pt = getattr(usage, "prompt_tokens", 0) or 0
+                ct = getattr(usage, "completion_tokens", 0) or 0
+                record_spend(pt, ct)
+                total_cost += round(estimate_run_cost(pt, ct), 4)
+
+            steps = data.get("steps") or FALLBACK_STEPS
+
+            # Ensure at least one screenshot
+            if not any(
+                isinstance(s, dict) and s.get("action") == "screenshot"
+                for s in steps
+            ):
+                steps.append({"action": "screenshot"})
+
+            # Enforce start route
+            if start_route and start_route != "/":
+                goto_step = {
+                    "action": "goto",
+                    "url": start_route,
+                    "selector": "",
+                    "text": "",
+                    "label": "",
+                    "expected_element": "",
+                }
+                if not steps or steps[0].get("action") != "goto" or (
+                    steps[0].get("url") or ""
+                ).strip() != start_route:
+                    steps = [goto_step] + steps
+
+            # Inject terminal assertion from contract
+            steps = _inject_terminal_assertion(steps, contract)
+            # Inject validation metadata on the last critical click.
+            steps = _inject_click_validation_from_terminal(steps, contract)
+
+            # DOM reconciliation (annotates, does not drop clicks)
+            dom_grounded = validate_against_dom(
+                steps,
+                dom_data,
+                diff_files,
+                allowed_routes_override=allowed_routes_override,
+                contract=contract,
+            )
+
+            validated = validate_steps(dom_grounded)
+            if not validated:
+                validated = FALLBACK_STEPS
+
+            normalized = normalize_steps(validated)
+            if not normalized:
+                normalized = FALLBACK_STEPS
+
+            normalized = _ensure_screenshots_for_visited_pages(normalized)
+
+            # -------------------------------------------------- #
+            # Normalization integrity check                        #
+            # -------------------------------------------------- #
+            norm_click_idx = 0
+            for raw_step in validated:
+                if raw_step.get("action") != "click":
+                    continue
+                raw_has_validation = bool(
+                    raw_step.get("success_condition")
+                    or raw_step.get("validation_condition")
                 )
-                if not norm_has_validation:
-                    print(
-                        f"[steps.step_generation] WARNING integrity_violation: "
-                        f"click step {_norm_click_idx} validation metadata lost during normalization",
-                        flush=True,
+                if raw_has_validation:
+                    norm_clicks = [
+                        s for s in normalized if s.get("action") == "click"
+                    ]
+                    norm_step = (
+                        norm_clicks[norm_click_idx]
+                        if norm_click_idx < len(norm_clicks)
+                        else None
                     )
-            _norm_click_idx += 1
+                    norm_has_validation = bool(
+                        norm_step and (
+                            norm_step.get("success_condition")
+                            or norm_step.get("validation_condition")
+                        )
+                    )
+                    if not norm_has_validation:
+                        record_contract_integrity_error(
+                            stage="normalization",
+                            reason="validation_condition lost during normalize_steps",
+                            contract_id=getattr(contract, "contract_id", "unknown"),
+                        )
+                        raise ContractIntegrityError(
+                            stage="normalization",
+                            field="validation_condition",
+                            expected="present",
+                            actual="missing",
+                            contract_id=getattr(contract, "contract_id", "unknown"),
+                        )
+                norm_click_idx += 1
+
+            # -------------------------------------------------- #
+            # Pre-flight gate                                      #
+            # -------------------------------------------------- #
+            preflight = preflight_gate(normalized, contract)
+
+            if preflight.passed:
+                print(
+                    f"[steps.step_generation] preflight passed "
+                    f"attempt={attempt + 1}",
+                    flush=True,
+                )
+                break
+
+            print(
+                f"[steps.step_generation] preflight failed attempt={attempt + 1} "
+                f"errors={preflight.errors}",
+                flush=True,
+            )
+            preflight_errors = preflight.errors
+
+            if attempt == 1:
+                # Second attempt also failed — hard abort
+                record_contract_integrity_error(
+                    stage="preflight",
+                    reason="; ".join(preflight.errors),
+                    contract_id=getattr(contract, "contract_id", "unknown"),
+                    missing_targets=preflight.errors,
+                )
+                raise ContractIntegrityError(
+                    stage="preflight",
+                    field="plan_contract_match",
+                    expected="all targets covered",
+                    actual="; ".join(preflight.errors),
+                    contract_id=getattr(contract, "contract_id", "unknown"),
+                )
 
         narration = data.get("narration") or fallback_narration
         suggested_demo_flow = (data.get("suggested_demo_flow") or "").strip()
+
         print(
             f"[steps.step_generation] steps_generated={len(normalized)} "
-            f"suggested_demo_flow_chars={len(suggested_demo_flow)}",
+            f"total_cost_usd={total_cost:.4f}",
             flush=True,
         )
+
         return {
             "steps": normalized,
             "narration": narration,
             "suggested_demo_flow": suggested_demo_flow,
-            "llm_cost_usd": llm_cost_usd,
-            # Context passed to both stepwise execution and script-first pipeline.
+            "llm_cost_usd": total_cost,
             "generation_context": {
                 "dom_data": dom_data,
                 "diffs_for_prompt": diffs_for_prompt,
@@ -460,8 +890,12 @@ async def generate_steps_from_diff(
                 "suggested_demo_flow": suggested_demo_flow,
                 "app_hints": app_hints_text,
                 "contract": contract,
+                "extraction": extraction,
             },
         }
+
+    except ContractIntegrityError:
+        raise  # Do not swallow — let pipeline handle it
 
     except Exception as e:
         print(
@@ -472,6 +906,6 @@ async def generate_steps_from_diff(
             "steps": FALLBACK_STEPS,
             "narration": fallback_narration,
             "budget_exceeded": False,
-            "llm_cost_usd": 0.0,
+            "llm_cost_usd": total_cost,
             "generation_context": None,
         }

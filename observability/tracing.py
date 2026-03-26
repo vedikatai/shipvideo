@@ -139,6 +139,29 @@ def set_current_span_error(message: str) -> None:
         span.set_status(Status(StatusCode.ERROR, message))
 
 
+def record_contract_integrity_error(
+    *,
+    stage: str,
+    reason: str,
+    contract_id: str = "",
+    missing_targets: Optional[List[str]] = None,
+) -> None:
+    """
+    Attach contract-integrity diagnostics to the current span for metrics / exporters.
+    Business code should call this instead of importing OpenTelemetry directly.
+    """
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    span.set_attribute("contract_integrity.stage", stage[:256])
+    span.set_attribute("contract_integrity.reason", reason[:512])
+    if contract_id:
+        span.set_attribute("contract_integrity.contract_id", contract_id[:64])
+    if missing_targets:
+        joined = ",".join(missing_targets)[:1024]
+        span.set_attribute("contract_integrity.missing_targets", joined)
+
+
 @contextmanager
 def pipeline_run_span():
     """

@@ -58,6 +58,66 @@ _INTERACTIVE_ROLES = frozenset({
 })
 
 
+def _snapshot_name_set(snapshot: AgentBrowserSnapshot) -> set[str]:
+    names: set[str] = set()
+    for bucket in ("interactive_elements", "context_elements"):
+        for element in snapshot.get(bucket) or []:
+            if not isinstance(element, dict):
+                continue
+            name = str(element.get("name") or "").strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def compare_snapshots(
+    before: AgentBrowserSnapshot,
+    after: AgentBrowserSnapshot,
+) -> Dict[str, Any]:
+    """
+    Compute a human-friendly UI diff from two snapshots.
+
+    Returns a compact dict suitable for narration:
+      {
+        "url_changed": bool,
+        "from_url": str,
+        "to_url": str,
+        "added_elements": [str],
+        "removed_elements": [str],
+        "changed": bool,
+        "summary": str
+      }
+    """
+    before_names = _snapshot_name_set(before)
+    after_names = _snapshot_name_set(after)
+    added = sorted(after_names - before_names)[:12]
+    removed = sorted(before_names - after_names)[:12]
+    from_url = str(before.get("current_url") or "")
+    to_url = str(after.get("current_url") or "")
+    url_changed = from_url != to_url
+    changed = bool(url_changed or added or removed)
+    if not changed:
+        summary = "No meaningful UI change detected."
+    else:
+        parts: List[str] = []
+        if url_changed:
+            parts.append(f"URL changed to {to_url or '(unknown)'}")
+        if added:
+            parts.append("Appeared: " + ", ".join(added[:4]))
+        if removed:
+            parts.append("Disappeared: " + ", ".join(removed[:4]))
+        summary = "; ".join(parts)
+    return {
+        "url_changed": url_changed,
+        "from_url": from_url,
+        "to_url": to_url,
+        "added_elements": added,
+        "removed_elements": removed,
+        "changed": changed,
+        "summary": summary,
+    }
+
+
 class AgentBrowserError(RuntimeError):
     """
     Raised when an agent-browser CLI command fails.
@@ -356,6 +416,14 @@ class AgentBrowserCLI:
             return str(result["data"].get("text") or "")
         except AgentBrowserError:
             return ""
+
+    def compare_snapshots(
+        self,
+        before: AgentBrowserSnapshot,
+        after: AgentBrowserSnapshot,
+    ) -> Dict[str, Any]:
+        """Instance wrapper for snapshot diffing used by step runner."""
+        return compare_snapshots(before, after)
 
     # ------------------------------------------------------------------
     # Snapshot persistence

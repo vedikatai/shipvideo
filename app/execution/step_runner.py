@@ -271,6 +271,41 @@ def _discard_screenshots(paths: List[Path]) -> None:
             pass
 
 
+def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool:
+    needle = (expected or "").strip().lower()
+    if not needle:
+        return False
+    interactive_elements = snapshot.get("interactive_elements") or []
+    context_elements = snapshot.get("context_elements") or []
+    snapshot_text = str(snapshot.get("snapshot_text") or "")
+    print(
+        f"[terminal_check] looking for '{expected}' "
+        f"in {len(interactive_elements)} interactive, "
+        f"{len(context_elements)} context elements, "
+        f"snapshot_text_length={len(snapshot_text)}",
+        flush=True,
+    )
+    print(
+        f"[terminal_check] snapshot_text excerpt: "
+        f"{snapshot_text[:500]}",
+        flush=True,
+    )
+    for element in interactive_elements:
+        if not isinstance(element, dict):
+            continue
+        name = str(element.get("name") or "").strip().lower()
+        if needle and needle in name:
+            return True
+    for element in context_elements:
+        if not isinstance(element, dict):
+            continue
+        name = str(element.get("name") or "").strip().lower()
+        if needle and needle in name:
+            return True
+    snap_text = snapshot_text.lower()
+    return bool(needle and needle in snap_text)
+
+
 def _execute_one(
     page: Page,
     base_url: str,
@@ -620,6 +655,72 @@ def run_ab_stepwise(
                 continue
 
             # ------------------------------------------------------------------
+            # assert_terminal — check final terminal condition on current snapshot
+            # ------------------------------------------------------------------
+            if action == "assert_terminal":
+                condition = step.get("condition") or {}
+                expected_element = (
+                    step.get("expected_element")
+                    or (condition.get("value") if isinstance(condition, dict) else "")
+                    or ""
+                )
+                found = True
+                if expected_element:
+                    try:
+                        terminal_snapshot = extract_ab_context(cli, save_raw=False)
+                        found = _terminal_match_in_snapshot(terminal_snapshot, str(expected_element))
+                    except AgentBrowserError as exc:
+                        step_result.update(
+                            {
+                                "status": "failed",
+                                "outcome": "click_failed",
+                                "error": f"snapshot_failed:{exc}",
+                            }
+                        )
+                        step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
+                        results.append(step_result)
+                        return {
+                            "success": False,
+                            "final_outcome": _classify_final_outcome(
+                                success=False,
+                                failure_reason=f"snapshot_failed:{exc}",
+                            ),
+                            "steps_succeeded": steps_succeeded,
+                            "steps_failed": 1,
+                            "failure_reason": f"snapshot_failed:{exc}",
+                            "results": results,
+                            "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                        }
+
+                step_result["terminal_condition_reached"] = found
+                step_result["outcome"] = "success" if found else "terminal_not_reached"
+                if not found:
+                    print(
+                        f"[step_runner] terminal condition not reached: "
+                        f"expected={expected_element!r}",
+                        flush=True,
+                    )
+                step_result["status"] = "ok" if found else "failed"
+                step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
+                if found:
+                    steps_succeeded += 1
+                results.append(step_result)
+                if not found:
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason="terminal_not_reached",
+                        ),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 1,
+                        "failure_reason": "terminal_not_reached",
+                        "results": results,
+                        "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                    }
+                continue
+
+            # ------------------------------------------------------------------
             # click — core AB execution loop
             # ------------------------------------------------------------------
             if action == "click":
@@ -792,6 +893,7 @@ def run_ab_stepwise(
                         snap_before=snap,
                         snap_after=snap_after,
                     )
+                    ui_diff = cli.compare_snapshots(snap, snap_after)
                     condition = validation["condition"]
                     step_result.update({
                         "validation_result": validation,
@@ -800,6 +902,9 @@ def run_ab_stepwise(
                         "validation_source": validation["source"],
                         "validation_passed": validation["passed"],
                         "validation_actual": validation["actual"],
+                        "ui_diff": ui_diff,
+                        # narration pipeline can use this directly
+                        "ui_change_summary": ui_diff.get("summary", ""),
                     })
 
                     if condition is None:

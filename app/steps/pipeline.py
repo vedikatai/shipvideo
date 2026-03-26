@@ -11,10 +11,11 @@ Execution strategy:
 Call analyze_pr() for steps + narration; call run_pipeline() for full capture → render → upload.
 """
 from __future__ import annotations
-
+from app.steps.errors import ContractIntegrityError
 import os
 import subprocess
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +26,7 @@ from app.steps.step_generation import generate_steps_from_diff
 from app.storage import upload_video
 from app.script_pipeline import ScriptPipelineError, run_script_pipeline
 from app.trigger import evaluate_trigger
+from app.steps.metrics import new_run_metrics, write_run_metrics
 from app.config import load_config
 from observability import pipeline_step
 
@@ -114,6 +116,8 @@ async def analyze_pr(
             "suggested_demo_flow": flow.get("suggested_demo_flow", ""),
             "generation_context": flow.get("generation_context"),
         }
+    except ContractIntegrityError:
+        raise
     except Exception as e:
         print(
             f"[steps.pipeline/analyze_pr] failed: {type(e).__name__}: {e}",
@@ -165,6 +169,47 @@ def run_pipeline(
     video_path: Optional[Path] = None
     capture_summary: Dict[str, Any] = {}
     pipeline_used = "unknown"
+    run_metrics = new_run_metrics(pr_number)
+    run_metrics.preflight_passed = bool(generation_context)
+
+    def _apply_capture_metrics() -> None:
+        debug = capture_summary.get("debug") or {}
+        results = debug.get("results") or []
+        if not isinstance(results, list):
+            results = []
+        unvalidated = 0
+        validated = 0
+        wrong_clicks = 0
+        terminal_reached = False
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            outcome = str(r.get("outcome") or "")
+            if outcome == "unvalidated":
+                unvalidated += 1
+            if outcome == "wrong_click":
+                wrong_clicks += 1
+            if outcome == "success":
+                validated += 1
+            if r.get("terminal_condition_reached") is True:
+                terminal_reached = True
+        run_metrics.steps_unvalidated = unvalidated
+        run_metrics.steps_validated = validated
+        run_metrics.wrong_clicks = wrong_clicks
+        run_metrics.terminal_condition_reached = terminal_reached
+
+    def _finalize_run_metrics(*, success: bool, error: Optional[Exception] = None) -> None:
+        run_metrics.pipeline = str(capture_summary.get("pipeline_branch", pipeline_used) or pipeline_used)
+        run_metrics.capture_browser = str(capture_summary.get("capture_browser") or "unknown")
+        _apply_capture_metrics()
+        run_metrics.success = success
+        run_metrics.video_usable = bool(video_path and video_path.exists() and video_path.stat().st_size > 0)
+        if error is not None:
+            run_metrics.error_type = type(error).__name__
+            run_metrics.error_message = str(error)
+        run_metrics.finished_at = datetime.now(timezone.utc).isoformat()
+        metrics_path = write_run_metrics(run_metrics)
+        print(f"[steps.pipeline] run_metrics file={metrics_path.name}", flush=True)
 
     # ── Script-first (opt-in only) ───────────────────────────────────────────
     has_demo_flow = bool(
@@ -262,6 +307,7 @@ def run_pipeline(
                 print(f"[steps.pipeline/stepwise] stdout: {e.stdout[:500]}", flush=True)
             if e.stderr:
                 print(f"[steps.pipeline/stepwise] stderr: {e.stderr[:500]}", flush=True)
+            _finalize_run_metrics(success=False, error=e)
             raise
         except Exception as e:
             print(
@@ -269,11 +315,14 @@ def run_pipeline(
                 flush=True,
             )
             _tb.print_exc()
+            _finalize_run_metrics(success=False, error=e)
             raise
 
     # ── Final validation + upload ────────────────────────────────────────────
     if not video_path or not video_path.exists():
-        raise FileNotFoundError(f"Video file not found after {pipeline_used} pipeline: {video_path}")
+        err = FileNotFoundError(f"Video file not found after {pipeline_used} pipeline: {video_path}")
+        _finalize_run_metrics(success=False, error=err)
+        raise err
 
     print(f"[steps.pipeline] pipeline_used={pipeline_used} video={video_path}", flush=True)
     _vp = capture_summary.get("pipeline_branch", pipeline_used)
@@ -285,9 +334,14 @@ def run_pipeline(
         flush=True,
     )
 
-    if upload:
-        video_url = upload_video(video_path, pr_number=pr_number)
-    else:
-        video_url = str(video_path)
+    try:
+        if upload:
+            video_url = upload_video(video_path, pr_number=pr_number)
+        else:
+            video_url = str(video_path)
+    except Exception as e:
+        _finalize_run_metrics(success=False, error=e)
+        raise
 
+    _finalize_run_metrics(success=True)
     return video_url, capture_summary

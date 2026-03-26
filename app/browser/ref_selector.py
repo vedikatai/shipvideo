@@ -1,48 +1,3 @@
-"""
-Deterministic ref-selection policy — Phase 2 / Phase 3.
-
-Implements the decision layer for the Agent Browser accuracy experiment.
-Given a natural-language intent (e.g. "Generate API Key") and a normalized
-AgentBrowserSnapshot from Phase 1, this module returns a structured
-SelectionResult identifying which ref (@e1, @e2, …) should be clicked and why.
-
-Public API:
-    select_ref(intent, snapshot, *, mode, role_filter) -> SelectionResult
-
-Selection waterfall (deterministic, Mode A):
-    1. Exact name match            — element.name == intent  (case-sensitive)
-    2. Case-insensitive exact match — element.name.lower() == intent.lower()
-    3. Partial match               — intent ⊆ element.name or
-                                     element.name ⊆ intent  (case-insensitive)
-    At every level:
-        - Exactly 1 match  → return that ref with the corresponding reason.
-        - 2+ matches       → return "ambiguous" immediately; do not guess.
-        - 0 matches        → fall through to the next level.
-    If all levels are exhausted with no candidate → return "no_match".
-
-Experiment modes:
-    Mode A — "deterministic"
-        Runs only the deterministic waterfall above.
-        REQUIRED for all baseline comparison runs.
-
-    Mode B — "deterministic_plus_llm"
-        Intended to run the deterministic waterfall first, then fall back to
-        an LLM call when no deterministic match is found.
-        LLM fallback is NOT YET WIRED in Phase 2 (app/llm/step_generator.py
-        is left unchanged). Calling select_ref in Mode B returns the
-        deterministic result and logs a clear warning so that Mode B results
-        are never silently mixed with Mode A baseline data.
-
-Design constraints (Phase 2):
-    - No writes to any execution file (step_runner, step_execution unchanged).
-    - No modifications to the LLM planner (step_generator unchanged).
-    - No production code path is altered.
-
-Phase 3 addition:
-    derive_intent(step) — converts a standard step dict (the planner output
-    format) into a string intent for select_ref(). This is the explicit
-    "connect planning to execution" bridge required by the Phase 3 spec.
-"""
 from __future__ import annotations
 
 import re
@@ -50,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from app.browser.agent_browser_types import RefCandidate, SelectionResult
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot, ExperimentMode
+from app.llm.step_generator import find_ref_with_llm_sync
 
 
 # ---------------------------------------------------------------------------
@@ -91,33 +47,6 @@ def _log_result(result: SelectionResult) -> None:
         f"mode={result['mode']}",
         flush=True,
     )
-
-
-def _apply_mode(result: SelectionResult, mode: ExperimentMode) -> SelectionResult:
-    """
-    Apply mode-specific behavior after the deterministic waterfall completes.
-
-    Mode A ("deterministic"):
-        Returns the result unchanged. This is the baseline path.
-
-    Mode B ("deterministic_plus_llm"):
-        LLM fallback is not yet wired in Phase 2. The deterministic result is
-        returned unchanged AND a clear warning is printed so that any run in
-        Mode B is immediately visible in logs and can never be silently treated
-        as a Mode A baseline data point.
-
-        Phase 3 will wire the LLM fallback here when no_match or ambiguous is
-        returned in Mode B.
-    """
-    if mode == "deterministic_plus_llm":
-        print(
-            "[ref_selector] WARNING mode=deterministic_plus_llm — "
-            "LLM fallback NOT YET WIRED (Phase 2 only implements deterministic). "
-            "Returning deterministic result. "
-            "This run MUST NOT be compared against Mode A baseline results.",
-            flush=True,
-        )
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +188,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     if len(exact) > 1:
         result = SelectionResult(
@@ -270,7 +199,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     # ------------------------------------------------------------------
     # Level 2 — Case-insensitive exact name match
@@ -289,7 +218,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     if len(ci) > 1:
         result = SelectionResult(
@@ -300,7 +229,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     # ------------------------------------------------------------------
     # Level 3 — Partial match (substring in either direction, case-insensitive)
@@ -320,7 +249,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     if len(partial) > 1:
         result = SelectionResult(
@@ -331,11 +260,45 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     # ------------------------------------------------------------------
     # No match at any level
     # ------------------------------------------------------------------
+    if mode == "deterministic_plus_llm":
+        llm_ref = find_ref_with_llm_sync(
+            intent=intent,
+            interactive_elements=pool,
+            context_elements=list(snapshot.get("context_elements") or []),
+        )
+        if llm_ref:
+            llm_candidate = next(
+                (e for e in pool if e.get("ref") == llm_ref),
+                None,
+            )
+            llm_candidates: List[RefCandidate] = []
+            if llm_candidate is not None:
+                llm_candidates = [_make_candidate(llm_candidate, "llm_fallback")]
+            result = SelectionResult(
+                chosen_ref=llm_ref,
+                selection_reason="llm_fallback",
+                candidates=llm_candidates,
+                intent=intent,
+                mode=mode,
+            )
+            _log_result(result)
+            return result
+
+        result = SelectionResult(
+            chosen_ref="",
+            selection_reason="unrecoverable",
+            candidates=[],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+
     result = SelectionResult(
         chosen_ref="",
         selection_reason="no_match",
