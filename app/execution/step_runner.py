@@ -57,6 +57,9 @@ def _build_metrics(
     wrong_click_count = sum(
         1 for r in results if r.get("outcome") == "wrong_click"
     )
+    unvalidated_count = sum(
+        1 for r in results if r.get("outcome") == "unvalidated"
+    )
     failure_counts: Dict[str, int] = {}
     for r in results:
         outcome = (r.get("outcome") or "").strip()
@@ -75,6 +78,7 @@ def _build_metrics(
         "retries_per_run": float(total_retries),
         "failure_type_counts": failure_counts,
         "wrong_click_count": wrong_click_count,
+        "steps_unvalidated": unvalidated_count,
         "avg_step_latency_ms": round(avg_latency, 1),
     }
 

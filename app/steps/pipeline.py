@@ -67,6 +67,16 @@ async def analyze_pr(
 
         print(f"[steps.pipeline/analyze_pr] files_changed={len(diff_files)}", flush=True)
 
+        from app.steps.contract_extraction import extract_contract_static
+        contract = extract_contract_static(diff_files)
+        print(
+            f"[steps.pipeline/analyze_pr] contract_id={contract.contract_id} "
+            f"confidence={contract.confidence} "
+            f"targets={len(contract.targets)} "
+            f"start_route={contract.start_route!r}",
+            flush=True,
+        )
+
         config = load_config()
         decision = evaluate_trigger(diff_files, config)
         print(
@@ -90,6 +100,7 @@ async def analyze_pr(
             staging_url,
             start_route=start_route,
             general_demo=decision.general_demo,
+            contract=contract,
         )
         steps = flow.get("steps") or [{"action": "screenshot"}]
         narration = flow.get("narration") or "Demo screenshot for this pull request."

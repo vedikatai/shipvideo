@@ -71,6 +71,7 @@ def wait_for_preview_ready(
     import time
     import urllib.request
     import urllib.error
+    import ssl
 
     config = load_config()
     timeout = timeout_seconds if timeout_seconds is not None else config.get("preview_ready_timeout_seconds", 300)
@@ -83,14 +84,30 @@ def wait_for_preview_ready(
     deadline = time.monotonic() + timeout
     next_log = time.monotonic()
 
+    # Use a robust CA bundle for Python urllib.
+    # Your system/curl trust store may differ from Python's default trust store.
+    ssl_context = None
+    try:
+        import certifi  # type: ignore
+
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ssl_context = None
+
     while time.monotonic() < deadline:
         try:
             req = urllib.request.Request(url, method="HEAD")
             req.add_header("User-Agent", "ShipVideo-Engine/1.0")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                if 200 <= resp.status < 400:
-                    print(f"[preview] ready url={url}", flush=True)
-                    return True
+            if ssl_context is not None:
+                with urllib.request.urlopen(req, timeout=15, context=ssl_context) as resp:
+                    if 200 <= resp.status < 400:
+                        print(f"[preview] ready url={url}", flush=True)
+                        return True
+            else:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if 200 <= resp.status < 400:
+                        print(f"[preview] ready url={url}", flush=True)
+                        return True
         except (urllib.error.URLError, urllib.error.HTTPError, OSError) as e:
             if time.monotonic() >= next_log:
                 print(f"[preview] waiting for ready error={e!r}", flush=True)

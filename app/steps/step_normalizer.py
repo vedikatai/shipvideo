@@ -2,7 +2,18 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 
-VALID_ACTIONS = {"goto", "click", "screenshot"}
+VALID_ACTIONS = {"goto", "click", "screenshot", "assert_terminal"}
+
+# Validation metadata fields that must survive normalization intact.
+# These are consumed by the AB runner to validate post-click page state.
+_PASSTHROUGH_FIELDS = (
+    "success_condition",
+    "validation_condition",
+    "validation_source",
+    "expected_url",
+    "expected_testid",
+    "terminal",
+)
 
 
 def _normalize_selector_quotes(selector: str) -> str:
@@ -45,12 +56,23 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             selector = (step.get("selector") or step.get("element") or step.get("target") or "").strip()
             label = (step.get("label") or "").strip()
             text = (step.get("text") or "").strip()
+
+            base: Dict[str, Any] = {}
             if label:
-                normalized.append({"action": "click", "label": label})
+                base = {"action": "click", "label": label}
             elif text:
-                normalized.append({"action": "click", "label": text})
+                base = {"action": "click", "label": text}
             elif selector:
-                normalized.append({"action": "click", "selector": selector})
+                base = {"action": "click", "selector": selector}
+
+            if base:
+                # Preserve validation metadata so the AB runner can validate
+                # post-click page state. Without this, every click is unvalidated.
+                for field in _PASSTHROUGH_FIELDS:
+                    val = step.get(field)
+                    if val is not None:
+                        base[field] = val
+                normalized.append(base)
 
         elif action == "goto":
             url = (step.get("url", "/") or "/").strip()
@@ -68,6 +90,15 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "label": step.get("label", ""),
                 }
             )
+
+        elif action == "assert_terminal":
+            # Preserve all terminal assertion fields as-is.
+            terminal_step: Dict[str, Any] = {"action": "assert_terminal"}
+            for field in ("condition", "expected_url", "expected_text", "expected_element"):
+                val = step.get(field)
+                if val is not None:
+                    terminal_step[field] = val
+            normalized.append(terminal_step)
 
     return normalized
 

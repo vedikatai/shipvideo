@@ -184,6 +184,7 @@ async def generate_steps_from_diff(
     *,
     start_route: Optional[str] = None,
     general_demo: bool = False,
+    contract: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Generates capture steps and narration from PR diff + live DOM using Azure OpenAI.
@@ -405,6 +406,35 @@ async def generate_steps_from_diff(
             normalized = FALLBACK_STEPS
         normalized = _ensure_screenshots_for_visited_pages(normalized)
 
+        # Integrity check: warn when normalization drops validation metadata.
+        # With _PASSTHROUGH_FIELDS now preserved this should never fire,
+        # but the check makes regressions immediately visible in logs.
+        _norm_click_idx = 0
+        for raw_step in validated:
+            if raw_step.get("action") != "click":
+                continue
+            raw_has_validation = bool(
+                raw_step.get("success_condition") or raw_step.get("validation_condition")
+            )
+            if raw_has_validation:
+                # Find the corresponding normalized click step by order.
+                norm_clicks = [
+                    s for s in normalized if s.get("action") == "click"
+                ]
+                norm_step = norm_clicks[_norm_click_idx] if _norm_click_idx < len(norm_clicks) else None
+                norm_has_validation = bool(
+                    norm_step and (
+                        norm_step.get("success_condition") or norm_step.get("validation_condition")
+                    )
+                )
+                if not norm_has_validation:
+                    print(
+                        f"[steps.step_generation] WARNING integrity_violation: "
+                        f"click step {_norm_click_idx} validation metadata lost during normalization",
+                        flush=True,
+                    )
+            _norm_click_idx += 1
+
         narration = data.get("narration") or fallback_narration
         suggested_demo_flow = (data.get("suggested_demo_flow") or "").strip()
         print(
@@ -429,6 +459,7 @@ async def generate_steps_from_diff(
                 "start_route": start_route,
                 "suggested_demo_flow": suggested_demo_flow,
                 "app_hints": app_hints_text,
+                "contract": contract,
             },
         }
 
