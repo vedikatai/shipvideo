@@ -230,10 +230,15 @@ def run_capture(
     # Phase 3 / Phase 4 — Agent Browser experiment path
     # ------------------------------------------------------------------
     if BROWSER_BACKEND == "agent_browser_cli":
+        _objective = {
+            "goal": "Recover missing prerequisite interactions from current DOM",
+            "generation_context": generation_context or {},
+        }
         _runner_result = run_ab_stepwise(
             preview_url=preview_url,
             initial_steps=steps,
             screenshot_dir=out_dir,
+            objective=_objective,
             capture_settings=capture_settings,
             mode=_EXPERIMENT_MODE,
         )

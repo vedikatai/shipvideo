@@ -181,6 +181,10 @@ def run_pipeline(
         validated = 0
         wrong_clicks = 0
         terminal_reached = False
+        console_count = 0
+        page_error_count = 0
+        network_request_count = 0
+        network_error_count = 0
         for r in results:
             if not isinstance(r, dict):
                 continue
@@ -193,10 +197,22 @@ def run_pipeline(
                 validated += 1
             if r.get("terminal_condition_reached") is True:
                 terminal_reached = True
+            diagnostics = r.get("diagnostics") or {}
+            if isinstance(diagnostics, dict):
+                console_count += len(diagnostics.get("console_messages") or [])
+                page_error_count += len(diagnostics.get("page_errors") or [])
+                network_request_count += int(diagnostics.get("network_request_count") or 0)
+                network_error_count += int(diagnostics.get("network_error_count") or 0)
         run_metrics.steps_unvalidated = unvalidated
         run_metrics.steps_validated = validated
         run_metrics.wrong_clicks = wrong_clicks
         run_metrics.terminal_condition_reached = terminal_reached
+        run_metrics.extra.update({
+            "console_count": console_count,
+            "page_error_count": page_error_count,
+            "network_request_count": network_request_count,
+            "network_error_count": network_error_count,
+        })
 
     def _finalize_run_metrics(*, success: bool, error: Optional[Exception] = None) -> None:
         run_metrics.pipeline = str(capture_summary.get("pipeline_branch", pipeline_used) or pipeline_used)

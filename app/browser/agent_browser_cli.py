@@ -7,10 +7,20 @@ agent-browser daemon go through this module.
 
 Public API:
     AgentBrowserCLI.open(url)               — navigate to URL
+    AgentBrowserCLI.set_viewport(...)       — set deterministic viewport size
     AgentBrowserCLI.snapshot(...)           — take accessibility snapshot,
                                               normalize to AgentBrowserSnapshot
     AgentBrowserCLI.click(ref)              — click element by ref (@e1, @e2, …)
     AgentBrowserCLI.wait(ms)                — wait for a fixed number of ms
+    AgentBrowserCLI.wait_for_load_state(...) — wait for page load state
+    AgentBrowserCLI.wait_for_text(...)      — wait for text to appear
+    AgentBrowserCLI.wait_for_url(...)       — wait for URL pattern
+    AgentBrowserCLI.scroll_into_view(...)   — move a target into view
+    AgentBrowserCLI.is_visible(...)         — check whether a target is visible
+    AgentBrowserCLI.is_enabled(...)         — check whether a target is enabled
+    AgentBrowserCLI.console_messages()      — read browser console entries
+    AgentBrowserCLI.page_errors()           — read page errors/exceptions
+    AgentBrowserCLI.network_requests()      — read network request history
     AgentBrowserCLI.screenshot(path)        — save a screenshot to disk
     AgentBrowserCLI.close()                 — close the browser session
     AgentBrowserCLI.get_url()               — return the current page URL
@@ -281,6 +291,20 @@ class AgentBrowserCLI:
         print(f"[agent_browser] open url={url!r}", flush=True)
         return self._run("open", url)
 
+    def set_viewport(self, width: int, height: int) -> CommandResult:
+        """
+        Set the browser viewport to a deterministic size for the session.
+
+        Corresponds to: agent-browser set viewport <width> <height>
+        """
+        width_px = int(width)
+        height_px = int(height)
+        print(
+            f"[agent_browser] set viewport width={width_px} height={height_px}",
+            flush=True,
+        )
+        return self._run("set", "viewport", str(width_px), str(height_px))
+
     def snapshot(
         self,
         *,
@@ -359,6 +383,54 @@ class AgentBrowserCLI:
         """
         return self._run("wait", str(ms))
 
+    def wait_for_load_state(self, state: str, *, timeout: int = 15) -> CommandResult:
+        """
+        Wait until the page reaches a load state.
+
+        Corresponds to: agent-browser wait --load <state>
+        """
+        state_norm = (state or "").strip().lower()
+        if state_norm not in {"domcontentloaded", "networkidle"}:
+            raise ValueError(f"unsupported load state: {state!r}")
+        print(f"[agent_browser] wait load_state={state_norm!r}", flush=True)
+        return self._run("wait", "--load", state_norm, timeout=timeout)
+
+    def wait_for_text(self, text: str, *, timeout: int = 10) -> CommandResult:
+        """
+        Wait until the given text is visible on the page.
+
+        Corresponds to: agent-browser wait --text <text>
+        """
+        expected = (text or "").strip()
+        if not expected:
+            raise ValueError("text cannot be empty")
+        print(f"[agent_browser] wait text={expected!r}", flush=True)
+        return self._run("wait", "--text", expected, timeout=timeout)
+
+    def wait_for_url(self, pattern: str, *, timeout: int = 10) -> CommandResult:
+        """
+        Wait until the current URL matches the provided pattern.
+
+        Corresponds to: agent-browser wait --url <pattern>
+        """
+        expected = (pattern or "").strip()
+        if not expected:
+            raise ValueError("pattern cannot be empty")
+        print(f"[agent_browser] wait url={expected!r}", flush=True)
+        return self._run("wait", "--url", expected, timeout=timeout)
+
+    def scroll_into_view(self, ref_or_selector: str) -> CommandResult:
+        """
+        Scroll the target into the viewport before interaction.
+
+        Corresponds to: agent-browser scrollintoview <ref_or_selector>
+        """
+        target = (ref_or_selector or "").strip()
+        if not target:
+            raise ValueError("ref_or_selector cannot be empty")
+        print(f"[agent_browser] scrollintoview target={target!r}", flush=True)
+        return self._run("scrollintoview", target)
+
     def scroll(self, direction: str = "down", px: int = 700) -> CommandResult:
         """
         Scroll page viewport to surface off-screen targets.
@@ -369,6 +441,43 @@ class AgentBrowserCLI:
         dist = int(px)
         print(f"[agent_browser] scroll direction={dir_norm!r} px={dist}", flush=True)
         return self._run("scroll", dir_norm, str(dist))
+
+    def is_visible(self, ref_or_selector: str) -> bool:
+        """Return True when the target is currently visible."""
+        try:
+            result = self._run("is", "visible", ref_or_selector)
+            return self._coerce_bool(result, primary_keys=("visible", "isVisible"))
+        except AgentBrowserError:
+            return False
+
+    def is_enabled(self, ref_or_selector: str) -> bool:
+        """Return True when the target is currently enabled."""
+        try:
+            result = self._run("is", "enabled", ref_or_selector)
+            return self._coerce_bool(result, primary_keys=("enabled", "isEnabled"))
+        except AgentBrowserError:
+            return False
+
+    def console_messages(self) -> List[str]:
+        try:
+            result = self._run("console")
+            return self._coerce_string_list(result)
+        except AgentBrowserError:
+            return []
+
+    def page_errors(self) -> List[str]:
+        try:
+            result = self._run("errors")
+            return self._coerce_string_list(result)
+        except AgentBrowserError:
+            return []
+
+    def network_requests(self) -> List[Dict[str, Any]]:
+        try:
+            result = self._run("network", "requests")
+            return self._coerce_request_list(result)
+        except AgentBrowserError:
+            return []
 
     def screenshot(self, path: str | Path) -> CommandResult:
         """
@@ -468,6 +577,58 @@ class AgentBrowserCLI:
         if m:
             return f"@e{m.group(1)}"
         return ""
+
+    def _coerce_bool(
+        self,
+        result: CommandResult,
+        *,
+        primary_keys: tuple[str, ...],
+    ) -> bool:
+        data = result.get("data") or {}
+        for key in primary_keys:
+            value = data.get(key)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "false"}:
+                    return lowered == "true"
+        stdout = str(result.get("stdout") or "").strip().lower()
+        if stdout in {"true", "false"}:
+            return stdout == "true"
+        return False
+
+    def _coerce_string_list(self, result: CommandResult) -> List[str]:
+        data = result.get("data") or {}
+        for key in ("messages", "errors", "items", "logs", "entries"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(data, list):
+            return [str(item).strip() for item in data if str(item).strip()]
+        stdout = str(result.get("stdout") or "").strip()
+        if not stdout:
+            return []
+        return [line.strip() for line in stdout.splitlines() if line.strip()]
+
+    def _coerce_request_list(self, result: CommandResult) -> List[Dict[str, Any]]:
+        data = result.get("data") or {}
+        raw_items: Any = data
+        if isinstance(data, dict):
+            for key in ("requests", "items", "entries"):
+                candidate = data.get(key)
+                if isinstance(candidate, list):
+                    raw_items = candidate
+                    break
+        if not isinstance(raw_items, list):
+            return []
+        requests: List[Dict[str, Any]] = []
+        for item in raw_items:
+            if isinstance(item, dict):
+                requests.append(item)
+            elif isinstance(item, str) and item.strip():
+                requests.append({"summary": item.strip()})
+        return requests
 
     def _find_ref_in_obj(self, obj: Any) -> str:
         if isinstance(obj, dict):

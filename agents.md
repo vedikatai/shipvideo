@@ -32,6 +32,7 @@ When given a task:
 2. Make minimal, focused changes.
 3. Explain reasoning briefly and clearly.
 4. Ensure code compiles and tests pass.
+-No need to add comment anywhere just write code 
 
 ## Communication Style
 

@@ -180,3 +180,23 @@ class StepValidationResult(TypedDict):
     actual: str
     source: ValidationSource
     failure_reason: str
+
+
+class ABPageSettleResult(TypedDict):
+    domcontentloaded: bool
+    networkidle: bool
+    validation_wait: str
+    fallback_wait_used: bool
+
+
+class ABTargetResolution(TypedDict):
+    chosen_ref: str
+    selection_reason: str
+    selection_source: str
+    scroll_retry_used: bool
+    should_retry: bool
+
+
+class ABActionabilityResult(TypedDict):
+    target_visible: bool
+    target_enabled: bool

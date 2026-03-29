@@ -4,10 +4,14 @@ import json
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from playwright.sync_api import Page, sync_playwright
 
 from app.browser.agent_browser_types import (
+    ABActionabilityResult,
+    ABPageSettleResult,
+    ABTargetResolution,
     StepValidationResult,
     ValidationCondition,
 )
@@ -17,6 +21,7 @@ from app.dom_schema import ExperimentMode
 from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
 from app.llm.retry_engine import regenerate_with_feedback
 from app.policy.selector_validator import validate_step_against_dom
+from observability import record_agent_browser_diagnostics
 
 # ---------------------------------------------------------------------------
 # Phase 3 — AB runner loop controls (hard limits, never configurable below these)
@@ -27,10 +32,17 @@ MAX_STEPS_PER_RUN: int = 10
 
 #: Maximum per-step attempts for stale-ref recovery (initial try + one retry).
 MAX_RETRIES_PER_STEP: int = 2
+MAX_AB_REPLANS_PER_RUN: int = 1
 
 #: Minimum wait in milliseconds after any click, before re-snapshot.
 #: Gives the page time to settle (animation, navigation, async state).
 WAIT_AFTER_CLICK_MS: int = 1500
+
+# Agent Browser settle timeouts. The runner prefers command-level readiness
+# signals and only falls back to a fixed wait when those signals are unavailable.
+AB_DOMCONTENTLOADED_TIMEOUT_S: int = 15
+AB_NETWORKIDLE_TIMEOUT_S: int = 8
+AB_VALIDATION_WAIT_TIMEOUT_S: int = 8
 
 
 def _log(event: str, payload: Dict[str, Any]) -> None:
@@ -144,6 +156,488 @@ def _extract_validation_condition(step: Dict[str, Any]) -> Optional[ValidationCo
     return _normalize_validation_condition(
         step.get("success_condition") or step.get("validation_condition")
     )
+
+
+def _configure_ab_session(cli: Any, capture_settings: CaptureSettings) -> Dict[str, Any]:
+    """Apply deterministic Agent Browser session settings before capturing UI."""
+    cli.set_viewport(
+        capture_settings.viewport_width,
+        capture_settings.viewport_height,
+    )
+    return {
+        "viewport_width": int(capture_settings.viewport_width),
+        "viewport_height": int(capture_settings.viewport_height),
+    }
+
+
+def _settle_ab_page(
+    cli: Any,
+    *,
+    validation_condition: Optional[ValidationCondition] = None,
+) -> ABPageSettleResult:
+    """
+    Prefer deterministic page readiness checks over blind sleeps.
+
+    `domcontentloaded` is the primary gate. `networkidle` and validation waits
+    are best-effort because modern apps may keep background activity alive.
+    If all command-level waits fail, fall back to the legacy fixed wait so the
+    runner stays resilient on older agent-browser versions.
+    """
+    settle: ABPageSettleResult = {
+        "domcontentloaded": False,
+        "networkidle": False,
+        "validation_wait": "",
+        "fallback_wait_used": False,
+    }
+
+    try:
+        cli.wait_for_load_state(
+            "domcontentloaded",
+            timeout=AB_DOMCONTENTLOADED_TIMEOUT_S,
+        )
+        settle["domcontentloaded"] = True
+    except Exception:
+        pass
+
+    try:
+        cli.wait_for_load_state(
+            "networkidle",
+            timeout=AB_NETWORKIDLE_TIMEOUT_S,
+        )
+        settle["networkidle"] = True
+    except Exception:
+        pass
+
+    if validation_condition is not None:
+        cond_type = validation_condition["type"]
+        cond_value = validation_condition["value"]
+        try:
+            if cond_type == "text_present":
+                cli.wait_for_text(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+                settle["validation_wait"] = "text_present"
+            elif cond_type == "url_match":
+                cli.wait_for_url(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+                settle["validation_wait"] = "url_match"
+        except Exception:
+            pass
+
+    if not settle["domcontentloaded"] and not settle["networkidle"]:
+        try:
+            cli.wait(WAIT_AFTER_CLICK_MS)
+            settle["fallback_wait_used"] = True
+        except Exception:
+            pass
+
+    return settle
+
+
+def _resolve_ab_click_target(
+    cli: Any,
+    *,
+    intent: str,
+    snapshot: Dict[str, Any],
+    mode: str,
+    allow_scroll_retry: bool,
+) -> ABTargetResolution:
+    """
+    Resolve a click target using deterministic selection first, then semantic
+    find, then a bounded scroll-and-resnapshot retry signal.
+    """
+    from app.browser.ref_selector import select_ref
+
+    sel = select_ref(intent, snapshot, mode=mode)  # type: ignore[arg-type]
+    resolved: ABTargetResolution = {
+        "chosen_ref": sel["chosen_ref"],
+        "selection_reason": sel["selection_reason"],
+        "selection_source": "deterministic",
+        "scroll_retry_used": False,
+        "should_retry": False,
+    }
+    if sel["chosen_ref"]:
+        return resolved
+
+    if str(sel.get("selection_reason") or "") == "ambiguous":
+        resolved["selection_source"] = "ambiguous"
+        return resolved
+
+    found_ref = cli.find_ref(intent)
+    if found_ref:
+        resolved.update({
+            "chosen_ref": found_ref,
+            "selection_reason": "ab_find",
+            "selection_source": "semantic_find",
+        })
+        return resolved
+
+    if allow_scroll_retry:
+        resolved["scroll_retry_used"] = True
+        resolved["should_retry"] = True
+    return resolved
+
+
+def _ensure_ab_target_actionable(cli: Any, click_target: str) -> ABActionabilityResult:
+    """
+    Bring the target into view, then verify it is both visible and enabled
+    before clicking.
+    """
+    try:
+        cli.scroll_into_view(click_target)
+    except Exception:
+        pass
+    _settle_ab_page(cli)
+    visible = cli.is_visible(click_target)
+    enabled = cli.is_enabled(click_target)
+    return {
+        "target_visible": visible,
+        "target_enabled": enabled,
+    }
+
+
+def _capture_ab_screenshot(
+    cli: Any,
+    *,
+    screenshot_dir: Path,
+    shot_idx: int,
+    step_result: Dict[str, Any],
+    step_result_key: str,
+    attempt_screenshots: List[Path],
+) -> int:
+    path = screenshot_dir / f"shot{shot_idx}.png"
+    try:
+        cli.screenshot(path)
+        attempt_screenshots.append(path)
+        step_result[step_result_key] = str(path)
+        return shot_idx + 1
+    except Exception:
+        return shot_idx
+
+
+def _run_ab_click_attempt(
+    *,
+    cli: Any,
+    step: Dict[str, Any],
+    step_result: Dict[str, Any],
+    screenshot_dir: Path,
+    shot_idx: int,
+    attempt: int,
+    click_attempt_limit: int,
+    mode: str,
+    extract_snapshot: Any,
+) -> Dict[str, Any]:
+    attempt_screenshots: List[Path] = []
+    result: Dict[str, Any] = {
+        "attempt_screenshots": attempt_screenshots,
+        "retry": False,
+        "retry_reason": "",
+        "outcome": "click_failed",
+        "error": "",
+        "stale_ref_error": False,
+        "snap_before": None,
+        "snap_after": None,
+        "validation": None,
+        "action_key": "",
+        "state_changed": False,
+        "click_target": "",
+        "shot_idx": shot_idx,
+    }
+
+    step_result["pre_snapshot_settle"] = _settle_ab_page(cli)
+    snap = extract_snapshot(save_raw=(attempt == 1))
+    result["snap_before"] = snap
+    step_result["raw_snapshot_path"] = snap.get("raw_snapshot_path", "")
+
+    intent = str(step_result.get("intent") or "")
+    resolution = _resolve_ab_click_target(
+        cli,
+        intent=intent,
+        snapshot=snap,
+        mode=mode,
+        allow_scroll_retry=(attempt < click_attempt_limit),
+    )
+    step_result.update({
+        "chosen_ref": resolution["chosen_ref"],
+        "selection_reason": resolution["selection_reason"],
+        "selection_source": resolution["selection_source"],
+        "scroll_retry_used": resolution["scroll_retry_used"],
+    })
+
+    if resolution["selection_source"] == "semantic_find":
+        _log(
+            "ab_runner.ab_find_recovered",
+            {
+                "index": step_result["index"],
+                "attempt": attempt,
+                "intent": intent,
+                "ref": resolution["chosen_ref"],
+            },
+        )
+
+    if resolution["should_retry"]:
+        result["retry"] = True
+        result["retry_reason"] = "scroll_retry"
+        return result
+
+    if not resolution["chosen_ref"]:
+        result["error"] = f"selection_failed:{resolution['selection_reason']}"
+        return result
+
+    click_target = resolution["chosen_ref"]
+    result["click_target"] = click_target
+    result["action_key"] = f"{snap['current_url']}:{click_target}"
+
+    actionability = _ensure_ab_target_actionable(cli, click_target)
+    step_result.update(actionability)
+    if not actionability["target_visible"] or not actionability["target_enabled"]:
+        result["error"] = (
+            "target_not_actionable:"
+            f"visible={actionability['target_visible']}:"
+            f"enabled={actionability['target_enabled']}"
+        )
+        _log("ab_runner.target_not_actionable", {
+            "index": step_result["index"],
+            "attempt": attempt,
+            "ref": click_target,
+            "visible": actionability["target_visible"],
+            "enabled": actionability["target_enabled"],
+        })
+        return result
+
+    shot_idx = _capture_ab_screenshot(
+        cli,
+        screenshot_dir=screenshot_dir,
+        shot_idx=shot_idx,
+        step_result=step_result,
+        step_result_key="before_screenshot",
+        attempt_screenshots=attempt_screenshots,
+    )
+    result["shot_idx"] = shot_idx
+
+    try:
+        cli.click(click_target)
+    except Exception as exc:
+        error_message = str(exc)
+        result["error"] = error_message
+        result["stale_ref_error"] = _is_stale_ref_error(error_message, click_target)
+        return result
+
+    validation_condition = _extract_validation_condition(step)
+    step_result["post_click_settle"] = _settle_ab_page(
+        cli,
+        validation_condition=validation_condition,
+    )
+
+    shot_idx = _capture_ab_screenshot(
+        cli,
+        screenshot_dir=screenshot_dir,
+        shot_idx=shot_idx,
+        step_result=step_result,
+        step_result_key="after_screenshot",
+        attempt_screenshots=attempt_screenshots,
+    )
+    result["shot_idx"] = shot_idx
+
+    snap_after = extract_snapshot(save_raw=False)
+    result["snap_after"] = snap_after
+    url_before = snap["current_url"]
+    url_after = snap_after["current_url"]
+    state_changed = _detect_state_change(
+        url_before,
+        url_after,
+        snap["snapshot_text"],
+        snap_after["snapshot_text"],
+    )
+    result["state_changed"] = state_changed
+    step_result.update({
+        "url_before": url_before,
+        "url_after": url_after,
+        "state_changed": state_changed,
+    })
+
+    validation = _evaluate_click_validation(
+        step=step,
+        snap_before=snap,
+        snap_after=snap_after,
+    )
+    result["validation"] = validation
+    ui_diff = cli.compare_snapshots(snap, snap_after)
+    condition = validation["condition"]
+    step_result.update({
+        "validation_result": validation,
+        "validation_type": condition["type"] if condition else "",
+        "validation_value": condition["value"] if condition else "",
+        "validation_source": validation["source"],
+        "validation_passed": validation["passed"],
+        "validation_actual": validation["actual"],
+        "ui_diff": ui_diff,
+        "ui_change_summary": ui_diff.get("summary", ""),
+    })
+
+    if condition is None:
+        result["outcome"] = "unvalidated"
+        return result
+    if validation["passed"]:
+        result["outcome"] = "success"
+        return result
+
+    result["outcome"] = "wrong_click"
+    step_result["validation_failure_reason"] = validation["failure_reason"]
+    return result
+
+
+def _ab_snapshot_to_dom_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    current_url = str(snapshot.get("current_url") or "")
+    current_path = urlparse(current_url).path or "/"
+    buttons: List[Dict[str, Any]] = []
+    links: List[Dict[str, Any]] = []
+
+    for element in snapshot.get("interactive_elements") or []:
+        if not isinstance(element, dict):
+            continue
+        role = str(element.get("role") or "").strip().lower()
+        name = str(element.get("name") or "").strip()
+        if not name:
+            continue
+        if role == "link":
+            links.append({
+                "text": name,
+                "href": "",
+                "testid": "",
+                "aria": "",
+                "id": "",
+            })
+        else:
+            buttons.append({
+                "text": name,
+                "testid": "",
+                "aria": "",
+                "title": "",
+                "id": "",
+                "selector": "",
+            })
+
+    return {
+        "current_path": current_path,
+        "routes": [current_path, "/"],
+        "buttons": buttons,
+        "links": links,
+        "inputs": [],
+        "data_testids": [],
+    }
+
+
+def _next_click_intent(steps: List[Dict[str, Any]], start_index: int) -> str:
+    from app.browser.ref_selector import derive_intent
+
+    for next_step in steps[start_index + 1:]:
+        if str(next_step.get("action") or "").strip() != "click":
+            continue
+        intent = derive_intent(next_step)
+        if intent:
+            return intent
+    return ""
+
+
+def _snapshot_has_intent(
+    snapshot: Dict[str, Any],
+    *,
+    intent: str,
+    mode: str,
+) -> bool:
+    if not intent:
+        return False
+    from app.browser.ref_selector import select_ref
+
+    selected = select_ref(intent, snapshot, mode=mode)  # type: ignore[arg-type]
+    return bool(selected.get("chosen_ref"))
+
+
+def _recover_ab_prerequisite_steps(
+    *,
+    objective: Optional[Dict[str, Any]],
+    steps: List[Dict[str, Any]],
+    step_index: int,
+    current_step: Dict[str, Any],
+    current_intent: str,
+    snap_after: Dict[str, Any],
+    mode: str,
+) -> Dict[str, Any]:
+    if not objective or current_step.get("_ab_recovery_attempted"):
+        return {"recovered": False, "attempts_used": 0}
+
+    next_intent = _next_click_intent(steps, step_index)
+    if not next_intent:
+        return {"recovered": False, "attempts_used": 0}
+    if _snapshot_has_intent(snap_after, intent=next_intent, mode=mode):
+        return {
+            "recovered": False,
+            "attempts_used": 0,
+            "next_intent": next_intent,
+            "next_target_present": True,
+        }
+
+    regenerated, attempts = regenerate_with_feedback(
+        objective=objective,
+        dom_context=_ab_snapshot_to_dom_context(snap_after),
+        error_context={
+            "error": "prerequisite_failure",
+            "failed_step": current_step,
+            "current_intent": current_intent,
+            "next_intent": next_intent,
+            "state_changed": False,
+            "current_url": str(snap_after.get("current_url") or ""),
+        },
+        max_attempts=1,
+        page=None,
+    )
+    if not regenerated:
+        return {
+            "recovered": False,
+            "attempts_used": len(attempts),
+            "next_intent": next_intent,
+            "next_target_present": False,
+        }
+
+    retried_step = dict(current_step)
+    retried_step["_ab_recovery_attempted"] = True
+    return {
+        "recovered": True,
+        "attempts_used": len(attempts),
+        "next_intent": next_intent,
+        "next_target_present": False,
+        "replacement_steps": regenerated + [retried_step],
+    }
+
+
+def _collect_ab_failure_diagnostics(cli: Any) -> Dict[str, Any]:
+    console_messages = cli.console_messages()
+    page_errors = cli.page_errors()
+    network_requests = cli.network_requests()
+    network_error_count = 0
+    for request in network_requests:
+        status = request.get("status")
+        error_text = str(request.get("error") or "").strip()
+        if isinstance(status, int) and status >= 400:
+            network_error_count += 1
+        elif error_text:
+            network_error_count += 1
+    diagnostics = {
+        "console_messages": console_messages[:20],
+        "page_errors": page_errors[:20],
+        "network_request_count": len(network_requests),
+        "network_error_count": network_error_count,
+        "network_requests_preview": network_requests[:20],
+    }
+    record_agent_browser_diagnostics(
+        console_count=len(console_messages),
+        page_error_count=len(page_errors),
+        network_request_count=len(network_requests),
+        network_error_count=network_error_count,
+    )
+    return diagnostics
+
+
+def _attach_ab_failure_diagnostics(cli: Any, step_result: Dict[str, Any]) -> None:
+    step_result["diagnostics"] = _collect_ab_failure_diagnostics(cli)
 
 
 def _contains_ci(haystack: str, needle: str) -> bool:
@@ -504,6 +998,7 @@ def run_ab_stepwise(
     preview_url: str,
     initial_steps: List[Dict[str, Any]],
     screenshot_dir: Path,
+    objective: Optional[Dict[str, Any]] = None,
     max_steps_per_run: int = MAX_STEPS_PER_RUN,
     max_retries_per_step: int = MAX_RETRIES_PER_STEP,
     mode: str = "deterministic",
@@ -555,6 +1050,7 @@ def run_ab_stepwise(
                              run_stepwise). Processed in order up to
                              max_steps_per_run.
         screenshot_dir     — directory for shot*.png files.
+        objective          — bounded runtime recovery context for conditional UI.
         max_steps_per_run  — hard upper bound on steps processed.
         max_retries_per_step — retry attempts per click step.
         mode               — ExperimentMode: "deterministic" (Mode A, default)
@@ -567,7 +1063,7 @@ def run_ab_stepwise(
     # Local imports: avoid pulling in the browser sub-package for callers that
     # only use run_stepwise (Playwright path).
     from app.browser.agent_browser_cli import AgentBrowserCLI, AgentBrowserError
-    from app.browser.ref_selector import derive_intent, select_ref
+    from app.browser.ref_selector import derive_intent
     from app.context.dom_extractor import extract_ab_context
 
     cs = capture_settings or CaptureSettings()
@@ -576,11 +1072,13 @@ def run_ab_stepwise(
         old.unlink()
 
     results: List[Dict[str, Any]] = []
+    queue: List[Dict[str, Any]] = list(initial_steps[:max_steps_per_run])
     steps_succeeded = 0
     shot_idx = 1
     # Tracks the last (url, chosen_ref) pair to detect stuck loops.
     last_action_key: Optional[str] = None
     _total_retries = 0  # Phase 4: total click-step retry attempts across all steps
+    _replans_used = 0
 
     _log("ab_runner.start", {
         "preview_url": preview_url,
@@ -593,8 +1091,12 @@ def run_ab_stepwise(
 
     try:
         cli.open(preview_url)
+        session_config = _configure_ab_session(cli, cs)
+        _settle_ab_page(cli)
 
-        for step_idx, step in enumerate(initial_steps[:max_steps_per_run]):
+        step_idx = 0
+        while step_idx < len(queue) and step_idx < max_steps_per_run:
+            step = queue[step_idx]
             action = step.get("action")
             _step_t0 = time.monotonic()  # Phase 4: per-step timing start
             step_result: Dict[str, Any] = {
@@ -614,11 +1116,14 @@ def run_ab_stepwise(
                 full_url = _resolve_url(preview_url, url)
                 try:
                     cli.open(full_url)
+                    step_result["page_settle"] = _settle_ab_page(cli)
+                    step_result["session_viewport"] = session_config
                     step_result.update({"status": "ok", "outcome": "success"})
                     steps_succeeded += 1
                     last_action_key = None  # navigation resets repeat detection
                 except AgentBrowserError as exc:
                     step_result.update({"outcome": "click_failed", "error": str(exc)})
+                    _attach_ab_failure_diagnostics(cli, step_result)
                     step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
                     results.append(step_result)
                     _log("ab_runner.goto_failed", {"index": step_idx, "url": full_url, "error": str(exc)})
@@ -636,6 +1141,7 @@ def run_ab_stepwise(
                     }
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
                 results.append(step_result)
+                step_idx += 1
                 continue
 
             # ------------------------------------------------------------------
@@ -652,6 +1158,7 @@ def run_ab_stepwise(
                 steps_succeeded += 1
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
                 results.append(step_result)
+                step_idx += 1
                 continue
 
             # ------------------------------------------------------------------
@@ -677,6 +1184,7 @@ def run_ab_stepwise(
                                 "error": f"snapshot_failed:{exc}",
                             }
                         )
+                        _attach_ab_failure_diagnostics(cli, step_result)
                         step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
                         results.append(step_result)
                         return {
@@ -706,6 +1214,7 @@ def run_ab_stepwise(
                     steps_succeeded += 1
                 results.append(step_result)
                 if not found:
+                    _attach_ab_failure_diagnostics(cli, step_result)
                     return {
                         "success": False,
                         "final_outcome": _classify_final_outcome(
@@ -716,8 +1225,9 @@ def run_ab_stepwise(
                         "steps_failed": 1,
                         "failure_reason": "terminal_not_reached",
                         "results": results,
-                        "metrics": _build_metrics(results, len(initial_steps), _total_retries),
-                    }
+                            "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                        }
+                step_idx += 1
                 continue
 
             # ------------------------------------------------------------------
@@ -758,196 +1268,138 @@ def run_ab_stepwise(
                 click_attempt_limit = min(max_retries_per_step, MAX_RETRIES_PER_STEP)
                 step_result["stale_ref_count"] = 0
 
+                runtime_recovered = False
+
                 for attempt in range(1, click_attempt_limit + 1):
                     attempts_used = attempt
-                    attempt_screenshots: List[Path] = []
                     _log("ab_runner.click_attempt", {
                         "index": step_idx, "attempt": attempt, "intent": intent,
                     })
 
-                    # Snapshot current page state.
-                    # Save raw JSON on first attempt only; post-click re-snapshots
-                    # use save_raw=False to keep disk usage bounded.
                     try:
-                        snap = extract_ab_context(cli, save_raw=(attempt == 1))
+                        attempt_result = _run_ab_click_attempt(
+                            cli=cli,
+                            step=step,
+                            step_result=step_result,
+                            screenshot_dir=screenshot_dir,
+                            shot_idx=shot_idx,
+                            attempt=attempt,
+                            click_attempt_limit=click_attempt_limit,
+                            mode=mode,
+                            extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                        )
                     except AgentBrowserError as exc:
                         outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
                         step_result["error"] = f"snapshot_failed:{exc}"
+                        _attach_ab_failure_diagnostics(cli, step_result)
                         _log("ab_runner.snapshot_failed", {"index": step_idx, "attempt": attempt})
-                        break  # not retriable
+                        break
 
-                    # Deterministic ref selection.
-                    sel = select_ref(intent, snap, mode=mode)  # type: ignore[arg-type]
-                    step_result.update({
-                        "raw_snapshot_path": snap.get("raw_snapshot_path", ""),
-                        "chosen_ref": sel["chosen_ref"],
-                        "selection_reason": sel["selection_reason"],
-                    })
-                    if not sel["chosen_ref"]:
-                        sel_reason = str(sel.get("selection_reason") or "")
-                        # Mode B: try Agent Browser semantic find before failing.
-                        if mode == "deterministic_plus_llm" and sel_reason == "no_match":
-                            found_ref = cli.find_ref(intent)
-                            if found_ref:
-                                sel = {**sel, "chosen_ref": found_ref, "selection_reason": "ab_find"}
-                                step_result.update(
-                                    {
-                                        "chosen_ref": found_ref,
-                                        "selection_reason": "ab_find",
-                                    }
-                                )
-                                _log(
-                                    "ab_runner.ab_find_recovered",
-                                    {
-                                        "index": step_idx,
-                                        "attempt": attempt,
-                                        "intent": intent,
-                                        "ref": found_ref,
-                                    },
-                                )
-                            elif attempt < click_attempt_limit:
-                                # Off-screen fallback: one scroll + re-snapshot retry.
-                                try:
-                                    cli.scroll("down", 700)
-                                    cli.wait(500)
-                                    _log(
-                                        "ab_runner.no_match_scroll_retry",
-                                        {
-                                            "index": step_idx,
-                                            "attempt": attempt,
-                                            "intent": intent,
-                                        },
-                                    )
-                                    continue
-                                except AgentBrowserError:
-                                    pass
+                    attempt_screenshots = list(attempt_result["attempt_screenshots"])
+                    shot_idx = int(attempt_result["shot_idx"])
 
-                        if not sel["chosen_ref"]:
-                            outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
-                            step_result["error"] = f"selection_failed:{sel['selection_reason']}"
-                            _log("ab_runner.selection_failed", {
-                                "index": step_idx,
-                                "attempt": attempt,
-                                "reason": sel["selection_reason"],
-                                "intent": intent,
-                            })
+                    if attempt_result["retry"]:
+                        try:
+                            cli.scroll("down", 700)
+                            cli.wait(500)
+                            _log(
+                                "ab_runner.no_match_scroll_retry",
+                                {
+                                    "index": step_idx,
+                                    "attempt": attempt,
+                                    "intent": intent,
+                                },
+                            )
+                            continue
+                        except AgentBrowserError:
+                            pass
+
+                    if attempt_result["stale_ref_error"]:
+                        click_target = str(attempt_result["click_target"] or "")
+                        error_message = str(attempt_result["error"])
+                        step_result["error"] = error_message
+                        step_result["stale_ref_count"] = int(step_result.get("stale_ref_count", 0)) + 1
+                        _discard_screenshots(attempt_screenshots)
+                        _log("ab_runner.stale_ref", {
+                            "index": step_idx,
+                            "attempt": attempt,
+                            "ref": click_target,
+                            "error": error_message,
+                            "stale_ref_count": step_result["stale_ref_count"],
+                        })
+                        if stale_ref_retry_used or attempt >= click_attempt_limit:
+                            _attach_ab_failure_diagnostics(cli, step_result)
+                            outcome = "stale_ref_unrecovered"
                             break
-                    click_target = sel["chosen_ref"]
+                        stale_ref_retry_used = True
+                        outcome = "stale_ref"
+                        continue
 
-                    # Repeat-action guard: same target on same URL without prior
-                    # state change means we are stuck in a loop.
-                    action_key = f"{snap['current_url']}:{click_target}"
+                    if attempt_result["error"]:
+                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                        step_result["error"] = str(attempt_result["error"])
+                        _attach_ab_failure_diagnostics(cli, step_result)
+                        _log("ab_runner.selection_failed", {
+                            "index": step_idx,
+                            "attempt": attempt,
+                            "reason": step_result["error"],
+                            "intent": intent,
+                        })
+                        break
+
+                    click_target = str(attempt_result["click_target"] or "")
+                    action_key = str(attempt_result["action_key"] or "")
                     if action_key == last_action_key:
                         outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
                         step_result["error"] = "repeated_action"
+                        _attach_ab_failure_diagnostics(cli, step_result)
                         _log("ab_runner.repeated_action", {
                             "index": step_idx,
                             "ref": click_target,
-                            "url": snap["current_url"],
+                            "url": str(step_result.get("url_before") or ""),
                         })
                         break
 
-                    # Before-click screenshot.
-                    before_path = screenshot_dir / f"shot{shot_idx}.png"
-                    try:
-                        cli.screenshot(before_path)
-                        shot_idx += 1
-                        attempt_screenshots.append(before_path)
-                        step_result["before_screenshot"] = str(before_path)
-                    except AgentBrowserError:
-                        pass  # non-fatal
+                    snap_after = attempt_result["snap_after"]
+                    state_changed = bool(attempt_result["state_changed"])
+                    validation = attempt_result["validation"]
+                    condition = validation["condition"] if validation else None
 
-                    # Execute the click.
-                    try:
-                        cli.click(click_target)
-                    except AgentBrowserError as exc:
-                        error_message = str(exc)
-                        step_result["error"] = error_message
-                        if _is_stale_ref_error(error_message, click_target):
-                            step_result["stale_ref_count"] = int(step_result.get("stale_ref_count", 0)) + 1
+                    if (
+                        not state_changed
+                        and _replans_used < MAX_AB_REPLANS_PER_RUN
+                    ):
+                        recovery = _recover_ab_prerequisite_steps(
+                            objective=objective,
+                            steps=queue,
+                            step_index=step_idx,
+                            current_step=step,
+                            current_intent=intent,
+                            snap_after=snap_after,
+                            mode=mode,
+                        )
+                        _total_retries += int(recovery.get("attempts_used", 0))
+                        if recovery.get("recovered"):
+                            _replans_used += 1
                             _discard_screenshots(attempt_screenshots)
-                            _log("ab_runner.stale_ref", {
+                            step_result["runtime_recovery"] = {
+                                "triggered": True,
+                                "next_intent": recovery.get("next_intent", ""),
+                            }
+                            queue[step_idx:step_idx + 1] = list(
+                                recovery.get("replacement_steps") or []
+                            )
+                            runtime_recovered = True
+                            _log("ab_runner.prerequisite_recovered", {
                                 "index": step_idx,
                                 "attempt": attempt,
-                                "ref": click_target,
-                                "error": error_message,
-                                "stale_ref_count": step_result["stale_ref_count"],
+                                "intent": intent,
+                                "next_intent": recovery.get("next_intent", ""),
                             })
-                            if stale_ref_retry_used or attempt >= click_attempt_limit:
-                                outcome = "stale_ref_unrecovered"
-                                break
-                            stale_ref_retry_used = True
-                            outcome = "stale_ref"
-                            continue
-
-                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
-                        _discard_screenshots(attempt_screenshots)
-                        _log("ab_runner.click_failed", {
-                            "index": step_idx, "attempt": attempt,
-                            "ref": click_target, "error": error_message,
-                        })
-                        break
-
-                    # Post-click wait: minimum 1.5 s floor to let the page settle
-                    # before state-change detection and after-screenshot.
-                    try:
-                        cli.wait(WAIT_AFTER_CLICK_MS)
-                    except AgentBrowserError:
-                        pass  # wait failure does not abort the step
-
-                    # After-click screenshot.
-                    after_path = screenshot_dir / f"shot{shot_idx}.png"
-                    try:
-                        cli.screenshot(after_path)
-                        shot_idx += 1
-                        attempt_screenshots.append(after_path)
-                        step_result["after_screenshot"] = str(after_path)
-                    except AgentBrowserError:
-                        pass  # non-fatal
-
-                    # Re-snapshot for state-change detection.
-                    try:
-                        snap_after = extract_ab_context(cli, save_raw=False)
-                    except AgentBrowserError as exc:
-                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
-                        step_result["error"] = f"snapshot_failed:{exc}"
-                        _discard_screenshots(attempt_screenshots)
-                        break
-
-                    url_before = snap["current_url"]
-                    url_after = snap_after["current_url"]
-                    state_changed = _detect_state_change(
-                        url_before, url_after,
-                        snap["snapshot_text"], snap_after["snapshot_text"],
-                    )
-
-                    step_result.update({
-                        "url_before": url_before,
-                        "url_after": url_after,
-                        "state_changed": state_changed,
-                    })
-
-                    validation = _evaluate_click_validation(
-                        step=step,
-                        snap_before=snap,
-                        snap_after=snap_after,
-                    )
-                    ui_diff = cli.compare_snapshots(snap, snap_after)
-                    condition = validation["condition"]
-                    step_result.update({
-                        "validation_result": validation,
-                        "validation_type": condition["type"] if condition else "",
-                        "validation_value": condition["value"] if condition else "",
-                        "validation_source": validation["source"],
-                        "validation_passed": validation["passed"],
-                        "validation_actual": validation["actual"],
-                        "ui_diff": ui_diff,
-                        # narration pipeline can use this directly
-                        "ui_change_summary": ui_diff.get("summary", ""),
-                    })
+                            break
 
                     if condition is None:
-                        outcome = "unvalidated"
+                        outcome = str(attempt_result["outcome"])
                         last_action_key = action_key
                         _log("ab_runner.unvalidated", {
                             "index": step_idx,
@@ -956,30 +1408,31 @@ def run_ab_stepwise(
                         })
                         break
 
-                    if validation["passed"]:
-                        outcome = "success"
+                    if validation and validation["passed"]:
+                        outcome = str(attempt_result["outcome"])
                         last_action_key = action_key
                         _log("ab_runner.validation_passed", {
                             "index": step_idx, "attempt": attempt,
-                            "url_before": url_before,
-                            "url_after": url_after,
+                            "url_before": step_result.get("url_before", ""),
+                            "url_after": step_result.get("url_after", ""),
                             "validation_type": condition["type"],
                             "validation_source": validation["source"],
                         })
                         break
-                    outcome = "wrong_click"
-                    step_result["validation_failure_reason"] = validation["failure_reason"]
+                    outcome = str(attempt_result["outcome"])
                     _discard_screenshots(attempt_screenshots)
                     _log("ab_runner.wrong_click", {
                         "index": step_idx, "attempt": attempt,
                         "ref": click_target,
                         "intent": intent,
                         "validation_type": condition["type"],
-                        "validation_failure_reason": validation["failure_reason"],
+                        "validation_failure_reason": validation["failure_reason"] if validation else "",
                     })
                     break
 
                 # End of retry loop.
+                if runtime_recovered:
+                    continue
                 _total_retries += max(attempts_used - 1, 0)
                 step_result["outcome"] = outcome
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
@@ -993,6 +1446,8 @@ def run_ab_stepwise(
                 })
                 if outcome in _FATAL_OUTCOMES:
                     step_result["status"] = "failed"
+                    if "diagnostics" not in step_result:
+                        _attach_ab_failure_diagnostics(cli, step_result)
                     results.append(step_result)
                     return {
                         "success": False,
@@ -1010,12 +1465,14 @@ def run_ab_stepwise(
                 step_result["status"] = "ok"
                 steps_succeeded += 1
                 results.append(step_result)
+                step_idx += 1
                 continue
 
             # ------------------------------------------------------------------
             # Unknown action — skip with warning; never fatal
             # ------------------------------------------------------------------
             step_result.update({"outcome": "click_failed", "status": "failed", "error": f"unknown_action:{action}"})
+            _attach_ab_failure_diagnostics(cli, step_result)
             step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
             _log("ab_runner.unknown_action", {"index": step_idx, "action": action})
             results.append(step_result)
@@ -1031,6 +1488,7 @@ def run_ab_stepwise(
                 "results": results,
                 "metrics": _build_metrics(results, len(initial_steps), _total_retries),
             }
+        # while loop end
 
     except AgentBrowserError as exc:
         _log("ab_runner.fatal_error", {"error": str(exc)})
@@ -1064,4 +1522,3 @@ def run_ab_stepwise(
         "results": results,
         "metrics": _build_metrics(results, len(initial_steps), _total_retries),
     }
-

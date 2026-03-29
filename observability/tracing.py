@@ -162,6 +162,22 @@ def record_contract_integrity_error(
         span.set_attribute("contract_integrity.missing_targets", joined)
 
 
+def record_agent_browser_diagnostics(
+    *,
+    console_count: int = 0,
+    page_error_count: int = 0,
+    network_request_count: int = 0,
+    network_error_count: int = 0,
+) -> None:
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    span.set_attribute("agent_browser.console_count", int(console_count))
+    span.set_attribute("agent_browser.page_error_count", int(page_error_count))
+    span.set_attribute("agent_browser.network_request_count", int(network_request_count))
+    span.set_attribute("agent_browser.network_error_count", int(network_error_count))
+
+
 @contextmanager
 def pipeline_run_span():
     """
