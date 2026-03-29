@@ -538,6 +538,55 @@ class AgentBrowserCLI:
         except AgentBrowserError:
             return ""
 
+    def get_count(self, selector: str) -> int:
+        try:
+            result = self._run("get", "count", selector)
+            return self._coerce_int(result, primary_keys=("count", "value"))
+        except AgentBrowserError:
+            return 0
+
+    def get_attr(self, ref_or_selector: str, attr: str) -> str:
+        try:
+            result = self._run("get", "attr", ref_or_selector, attr)
+            data = result.get("data") or {}
+            for key in ("value", "attr", attr):
+                value = data.get(key)
+                if value is not None:
+                    return str(value)
+            return str(result.get("stdout") or "").strip()
+        except AgentBrowserError:
+            return ""
+
+    def find_testid_ref(self, testid: str) -> str:
+        target = (testid or "").strip()
+        if not target:
+            return ""
+        try:
+            res = self._run("find", "testid", target, "text")
+            ref = self._extract_ref_from_find_output(res)
+            if ref:
+                print(f"[agent_browser] find_testid_ref testid={target!r} ref={ref!r}", flush=True)
+            return ref
+        except AgentBrowserError:
+            return ""
+
+    def find_role_ref(self, role: str, name: str) -> str:
+        role_norm = (role or "").strip().lower()
+        target = (name or "").strip()
+        if not role_norm or not target:
+            return ""
+        try:
+            res = self._run("find", "role", role_norm, "text", "--name", target)
+            ref = self._extract_ref_from_find_output(res)
+            if ref:
+                print(
+                    f"[agent_browser] find_role_ref role={role_norm!r} name={target!r} ref={ref!r}",
+                    flush=True,
+                )
+            return ref
+        except AgentBrowserError:
+            return ""
+
     def find_ref(self, intent: str) -> str:
         """
         Try Agent Browser semantic `find` commands and return a discovered ref.
@@ -597,6 +646,26 @@ class AgentBrowserCLI:
         if stdout in {"true", "false"}:
             return stdout == "true"
         return False
+
+    def _coerce_int(
+        self,
+        result: CommandResult,
+        *,
+        primary_keys: tuple[str, ...],
+    ) -> int:
+        data = result.get("data") or {}
+        for key in primary_keys:
+            value = data.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.isdigit():
+                    return int(stripped)
+        stdout = str(result.get("stdout") or "").strip()
+        if stdout.isdigit():
+            return int(stdout)
+        return 0
 
     def _coerce_string_list(self, result: CommandResult) -> List[str]:
         data = result.get("data") or {}

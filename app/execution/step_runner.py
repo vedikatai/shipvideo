@@ -800,6 +800,71 @@ def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool
     return bool(needle and needle in snap_text)
 
 
+def _assert_ab_terminal_condition(
+    cli: Any,
+    *,
+    condition: Dict[str, Any],
+    expected_element: str,
+    extract_snapshot: Any,
+) -> Dict[str, Any]:
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    expected = expected_element or cond_value
+    result: Dict[str, Any] = {
+        "found": True,
+        "source": "none",
+        "actual": "",
+    }
+
+    if cond_type == "text_present" and cond_value:
+        try:
+            cli.wait_for_text(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+            result["source"] = "wait_for_text"
+            result["actual"] = cond_value
+            return result
+        except Exception:
+            pass
+
+    if cond_type == "url_match" and cond_value:
+        try:
+            cli.wait_for_url(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
+            result["source"] = "wait_for_url"
+            result["actual"] = cli.get_url()
+            return result
+        except Exception:
+            pass
+
+    if cond_type == "element_present" and expected:
+        testid_ref = cli.find_testid_ref(expected)
+        if testid_ref:
+            result["source"] = "find_testid"
+            result["actual"] = testid_ref
+            return result
+
+        for selector in (f"[data-testid='{expected}']", f"#{expected}"):
+            count = cli.get_count(selector)
+            if count > 0:
+                result["source"] = "get_count"
+                result["actual"] = selector
+                return result
+
+        semantic_ref = cli.find_ref(expected)
+        if semantic_ref:
+            result["source"] = "semantic_find"
+            result["actual"] = semantic_ref
+            return result
+
+    if expected:
+        terminal_snapshot = extract_snapshot(save_raw=False)
+        found = _terminal_match_in_snapshot(terminal_snapshot, expected)
+        result["found"] = found
+        result["source"] = "snapshot_fallback"
+        result["actual"] = expected if found else ""
+        return result
+
+    return result
+
+
 def _execute_one(
     page: Page,
     base_url: str,
@@ -1172,10 +1237,19 @@ def run_ab_stepwise(
                     or ""
                 )
                 found = True
+                terminal_source = ""
+                terminal_actual = ""
                 if expected_element:
                     try:
-                        terminal_snapshot = extract_ab_context(cli, save_raw=False)
-                        found = _terminal_match_in_snapshot(terminal_snapshot, str(expected_element))
+                        terminal_result = _assert_ab_terminal_condition(
+                            cli,
+                            condition=condition if isinstance(condition, dict) else {},
+                            expected_element=str(expected_element),
+                            extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                        )
+                        found = bool(terminal_result.get("found"))
+                        terminal_source = str(terminal_result.get("source") or "")
+                        terminal_actual = str(terminal_result.get("actual") or "")
                     except AgentBrowserError as exc:
                         step_result.update(
                             {
@@ -1201,6 +1275,8 @@ def run_ab_stepwise(
                         }
 
                 step_result["terminal_condition_reached"] = found
+                step_result["terminal_validation_source"] = terminal_source
+                step_result["terminal_validation_actual"] = terminal_actual
                 step_result["outcome"] = "success" if found else "terminal_not_reached"
                 if not found:
                     print(
