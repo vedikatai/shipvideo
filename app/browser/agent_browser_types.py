@@ -93,8 +93,7 @@ SelectionReason = Literal[
     "partial_match",
     "ambiguous",
     "no_match",
-    "llm_fallback",
-    "unrecoverable",
+    "ab_find",
 ]
 
 

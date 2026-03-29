@@ -412,9 +412,13 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
                 except Exception as e:
                     # Never leave the user with a misleading success state.
+                    err_text = f"{type(e).__name__}: {e}"
+                    # Keep PR comments concise; full context stays in server logs.
+                    if len(err_text) > 600:
+                        err_text = err_text[:600].rstrip() + "... (truncated)"
                     error_message = (
                         "**Demo video not generated**\n\n"
-                        f"{type(e).__name__}: {e}\n\n"
+                        f"{err_text}\n\n"
                         "Debug context may be available in the server logs under `execution.*` JSON events."
                     )
                     comment_on_pr(repo_full_name, pr_number, None, error_message=error_message)

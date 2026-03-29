@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -358,6 +359,17 @@ class AgentBrowserCLI:
         """
         return self._run("wait", str(ms))
 
+    def scroll(self, direction: str = "down", px: int = 700) -> CommandResult:
+        """
+        Scroll page viewport to surface off-screen targets.
+
+        Corresponds to: agent-browser scroll <direction> <px>
+        """
+        dir_norm = (direction or "down").strip().lower() or "down"
+        dist = int(px)
+        print(f"[agent_browser] scroll direction={dir_norm!r} px={dist}", flush=True)
+        return self._run("scroll", dir_norm, str(dist))
+
     def screenshot(self, path: str | Path) -> CommandResult:
         """
         Save a screenshot of the current page to path.
@@ -416,6 +428,64 @@ class AgentBrowserCLI:
             return str(result["data"].get("text") or "")
         except AgentBrowserError:
             return ""
+
+    def find_ref(self, intent: str) -> str:
+        """
+        Try Agent Browser semantic `find` commands and return a discovered ref.
+        Returns "" when no ref can be extracted.
+        """
+        intent = (intent or "").strip()
+        if not intent:
+            return ""
+        attempts = [
+            ("find", "text", intent, "text"),
+            ("find", "role", "button", "text", "--name", intent),
+            ("find", "role", "link", "text", "--name", intent),
+        ]
+        for args in attempts:
+            try:
+                res = self._run(*args)
+                ref = self._extract_ref_from_find_output(res)
+                if ref:
+                    print(f"[agent_browser] find_ref intent={intent!r} ref={ref!r}", flush=True)
+                    return ref
+            except AgentBrowserError:
+                continue
+        return ""
+
+    def _extract_ref_from_find_output(self, result: CommandResult) -> str:
+        # Try structured payload first.
+        data = result.get("data") or {}
+        maybe = self._find_ref_in_obj(data)
+        if maybe:
+            return maybe
+        # Fallback to stdout parsing.
+        out = str(result.get("stdout") or "")
+        m = re.search(r"@e\d+", out)
+        if m:
+            return m.group(0)
+        m = re.search(r"ref[=\s]e(\d+)", out)
+        if m:
+            return f"@e{m.group(1)}"
+        return ""
+
+    def _find_ref_in_obj(self, obj: Any) -> str:
+        if isinstance(obj, dict):
+            for k in ("ref", "elementRef", "selected_ref"):
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    vv = v.strip()
+                    return vv if vv.startswith("@") else (f"@{vv}" if vv.startswith("e") else "")
+            for v in obj.values():
+                r = self._find_ref_in_obj(v)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for item in obj:
+                r = self._find_ref_in_obj(item)
+                if r:
+                    return r
+        return ""
 
     def compare_snapshots(
         self,

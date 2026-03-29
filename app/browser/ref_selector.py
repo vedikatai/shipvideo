@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 
 from app.browser.agent_browser_types import RefCandidate, SelectionResult
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot, ExperimentMode
-from app.llm.step_generator import find_ref_with_llm_sync
 
 
 # ---------------------------------------------------------------------------
@@ -265,40 +264,6 @@ def select_ref(
     # ------------------------------------------------------------------
     # No match at any level
     # ------------------------------------------------------------------
-    if mode == "deterministic_plus_llm":
-        llm_ref = find_ref_with_llm_sync(
-            intent=intent,
-            interactive_elements=pool,
-            context_elements=list(snapshot.get("context_elements") or []),
-        )
-        if llm_ref:
-            llm_candidate = next(
-                (e for e in pool if e.get("ref") == llm_ref),
-                None,
-            )
-            llm_candidates: List[RefCandidate] = []
-            if llm_candidate is not None:
-                llm_candidates = [_make_candidate(llm_candidate, "llm_fallback")]
-            result = SelectionResult(
-                chosen_ref=llm_ref,
-                selection_reason="llm_fallback",
-                candidates=llm_candidates,
-                intent=intent,
-                mode=mode,
-            )
-            _log_result(result)
-            return result
-
-        result = SelectionResult(
-            chosen_ref="",
-            selection_reason="unrecoverable",
-            candidates=[],
-            intent=intent,
-            mode=mode,
-        )
-        _log_result(result)
-        return result
-
     result = SelectionResult(
         chosen_ref="",
         selection_reason="no_match",

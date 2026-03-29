@@ -281,11 +281,18 @@ def run_pipeline(
             )
             if not capture_summary.get("success", False):
                 debug = capture_summary.get("debug") or {}
+                try:
+                    print(
+                        "[steps.pipeline/stepwise] debug_preview="
+                        f"{json.dumps(debug, ensure_ascii=False, default=str)[:4000]}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
                 raise RuntimeError(
                     "Stepwise capture failed and pipeline aborted. "
                     f"steps_failed={capture_summary.get('steps_failed')} "
-                    f"failure_reason={capture_summary.get('failure_reason')}. "
-                    f"debug_preview={json.dumps(debug, ensure_ascii=False, default=str)[:4000]}"
+                    f"failure_reason={capture_summary.get('failure_reason')}."
                 )
             render_video()
             video_path = SCREENSHOT_DIR / "out.mp4"

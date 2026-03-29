@@ -784,15 +784,54 @@ def run_ab_stepwise(
                         "selection_reason": sel["selection_reason"],
                     })
                     if not sel["chosen_ref"]:
-                        outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
-                        step_result["error"] = f"selection_failed:{sel['selection_reason']}"
-                        _log("ab_runner.selection_failed", {
-                            "index": step_idx,
-                            "attempt": attempt,
-                            "reason": sel["selection_reason"],
-                            "intent": intent,
-                        })
-                        break
+                        sel_reason = str(sel.get("selection_reason") or "")
+                        # Mode B: try Agent Browser semantic find before failing.
+                        if mode == "deterministic_plus_llm" and sel_reason == "no_match":
+                            found_ref = cli.find_ref(intent)
+                            if found_ref:
+                                sel = {**sel, "chosen_ref": found_ref, "selection_reason": "ab_find"}
+                                step_result.update(
+                                    {
+                                        "chosen_ref": found_ref,
+                                        "selection_reason": "ab_find",
+                                    }
+                                )
+                                _log(
+                                    "ab_runner.ab_find_recovered",
+                                    {
+                                        "index": step_idx,
+                                        "attempt": attempt,
+                                        "intent": intent,
+                                        "ref": found_ref,
+                                    },
+                                )
+                            elif attempt < click_attempt_limit:
+                                # Off-screen fallback: one scroll + re-snapshot retry.
+                                try:
+                                    cli.scroll("down", 700)
+                                    cli.wait(500)
+                                    _log(
+                                        "ab_runner.no_match_scroll_retry",
+                                        {
+                                            "index": step_idx,
+                                            "attempt": attempt,
+                                            "intent": intent,
+                                        },
+                                    )
+                                    continue
+                                except AgentBrowserError:
+                                    pass
+
+                        if not sel["chosen_ref"]:
+                            outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
+                            step_result["error"] = f"selection_failed:{sel['selection_reason']}"
+                            _log("ab_runner.selection_failed", {
+                                "index": step_idx,
+                                "attempt": attempt,
+                                "reason": sel["selection_reason"],
+                                "intent": intent,
+                            })
+                            break
                     click_target = sel["chosen_ref"]
 
                     # Repeat-action guard: same target on same URL without prior
