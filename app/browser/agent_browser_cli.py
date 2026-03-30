@@ -587,6 +587,19 @@ class AgentBrowserCLI:
         except AgentBrowserError:
             return ""
 
+    def find_label_ref(self, label: str) -> str:
+        target = (label or "").strip()
+        if not target:
+            return ""
+        try:
+            res = self._run("find", "label", target, "text")
+            ref = self._extract_ref_from_find_output(res)
+            if ref:
+                print(f"[agent_browser] find_label_ref label={target!r} ref={ref!r}", flush=True)
+            return ref
+        except AgentBrowserError:
+            return ""
+
     def find_ref(self, intent: str) -> str:
         """
         Try Agent Browser semantic `find` commands and return a discovered ref.
@@ -595,20 +608,23 @@ class AgentBrowserCLI:
         intent = (intent or "").strip()
         if not intent:
             return ""
-        attempts = [
-            ("find", "text", intent, "text"),
-            ("find", "role", "button", "text", "--name", intent),
-            ("find", "role", "link", "text", "--name", intent),
-        ]
-        for args in attempts:
-            try:
-                res = self._run(*args)
-                ref = self._extract_ref_from_find_output(res)
-                if ref:
-                    print(f"[agent_browser] find_ref intent={intent!r} ref={ref!r}", flush=True)
-                    return ref
-            except AgentBrowserError:
-                continue
+        for resolver in (
+            lambda: self.find_role_ref("button", intent),
+            lambda: self.find_role_ref("link", intent),
+            lambda: self.find_label_ref(intent),
+        ):
+            ref = resolver()
+            if ref:
+                print(f"[agent_browser] find_ref intent={intent!r} ref={ref!r}", flush=True)
+                return ref
+        try:
+            res = self._run("find", "text", intent, "text")
+            ref = self._extract_ref_from_find_output(res)
+            if ref:
+                print(f"[agent_browser] find_ref intent={intent!r} ref={ref!r}", flush=True)
+                return ref
+        except AgentBrowserError:
+            pass
         return ""
 
     def _extract_ref_from_find_output(self, result: CommandResult) -> str:

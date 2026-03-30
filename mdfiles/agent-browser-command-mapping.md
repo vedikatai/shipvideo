@@ -1,6 +1,6 @@
 # Agent Browser Command Mapping to Current Failures
 
-This document maps available `agent-browser` commands to current pipeline failure modes in `shipvideo-engine`, and identifies custom logic that can be reduced or removed by using built-in commands directly.
+This document maps the `agent-browser` commands we can actually use in `shipvideo-engine` today, and highlights where they can replace custom logic in the MVP pipeline. The main goal stays video accuracy, so the priority is command-level validation and deterministic recovery before any heuristic fallback.
 
 ## Current Failure Modes Observed
 
@@ -9,7 +9,26 @@ This document maps available `agent-browser` commands to current pipeline failur
 - many click outcomes marked `unvalidated` (weak early correctness signal)
 - flaky state transitions due to fixed waits
 - weak debugging artifacts when a run fails (hard to root-cause)
-- custom UI diff/narration heuristics that duplicate built-in diff capabilities
+- custom UI diff/narration heuristics that duplicate built-in command output
+
+## Current State
+
+These are already wired in the codebase:
+
+- `open`, `set viewport`, `snapshot`, `click`, `wait`, `scrollintoview`, `scroll`
+- `wait --load`, `wait --text`, `wait --url`
+- `is visible`, `is enabled`
+- `get url`, `get text`, `get count`, `get attr`
+- `find testid`, `find role`, `find label`, `find text`
+- `console`, `errors`, `network requests`
+- `screenshot`, `close`
+
+These are still mostly custom and should be reduced only if the command gives a clear accuracy win:
+
+- ref waterfall selection in `ref_selector.py`
+- terminal fallback matching by snapshot text
+- state-change heuristics from snapshot diffing
+- recovery regeneration in `llm/retry_engine.py`
 
 ## Command-to-Problem Mapping
 
@@ -30,9 +49,9 @@ This document maps available `agent-browser` commands to current pipeline failur
 | `scroll` / `scrollintoview` | offscreen targets | visibility issues | reduces false `no_match` due to viewport |
 | `drag <src> <tgt>` | drag workflows | unsupported action types | removes need for custom action extensions |
 | `upload <sel> <files>` | file upload flows | upload interaction | avoids custom filesystem + JS injection |
-| `screenshot [path]` / `pdf <path>` | evidence capture | artifacts | already used; can standardize labels |
-| `snapshot` | ref discovery and state capture | target grounding | already used; should tune options |
-| `eval <js>` | last-resort diagnostics only | runtime introspection | useful but should be minimized |
+| `screenshot [path]` | evidence capture | artifacts | already used; keep as primary visual proof |
+| `snapshot` | ref discovery and state capture | target grounding | already used; keep as primary grounding source |
+| `eval <js>` | last-resort diagnostics only | runtime introspection | not currently wrapped; avoid unless no native command exists |
 | `connect <port>` | debug against existing browser | repro in local browser state | avoids reproducing via daemon-only state |
 | `stream enable/status/disable` | live troubleshooting | real-time operator visibility | faster diagnosis than log-only runs |
 | `close` | teardown | cleanup | already used |
@@ -119,32 +138,31 @@ This document maps available `agent-browser` commands to current pipeline failur
 
 | Command | Where to Use | Solves | Better Than Current |
 |---|---|---|---|
-| `diff snapshot` | click-effect verification | weak custom UI diff heuristics | built-in semantic diff, less custom parsing |
-| `diff screenshot` | visual regressions | screenshot-only ambiguity | objective pixel-level evidence |
-| `trace start/stop` | full-run artifact | hard-to-reproduce failures | richer than current partial debug logs |
-| `profiler start/stop` | perf-related timeouts | slow-step ambiguity | actionable perf evidence |
-| `console` / `errors` | post-failure diagnostics | hidden frontend exceptions | immediate root cause visibility |
-| `highlight` / `inspect` | interactive debugging | selector uncertainty | faster local diagnosis |
+| `console` / `errors` | post-failure diagnostics | hidden frontend exceptions | already used; should remain part of every failure path |
+| `network requests` | post-failure diagnostics | backend/API failures | already used; good enough for MVP without HAR plumbing |
 
 ## Which Custom Logic Can Be Reduced
 
 ## Candidate Removals / Simplifications
 
 - **Custom Mode B LLM fallback in `ref_selector.py`**
-  - Replace first with semantic `find role/text/testid ... click` fallback.
-  - Keep LLM as final fallback only if semantic commands fail.
+  - Replace first with semantic `find testid`, `find role`, `find label`, and `find text`.
+  - Keep LLM as final fallback only if command-based recovery fails.
 
 - **Custom fixed wait strategy (`WAIT_AFTER_CLICK_MS`)**
-  - Replace primary wait with `wait --load` and/or `wait --text` per step.
+  - Replace primary wait with `wait --load` and `wait --text` per step.
+  - Keep a short fixed wait only as a last fallback for animated pages.
 
 - **Custom terminal detection by snapshot name/text only**
-  - Use `wait --text`, `get attr`, `is visible`, `get count`, and optionally `find testid` checks.
+  - Use `wait --text`, `wait --url`, `get attr`, `is visible`, `get count`, and `find testid`.
 
 - **Custom UI diff extraction from snapshot names**
-  - Prefer `diff snapshot` and optionally `diff screenshot` for stronger signal.
+  - Prefer snapshot-based diffs only if they are used to explain video accuracy.
+  - Keep the current `compare_snapshots` helper until a real native diff command is wrapped.
 
 - **Sparse diagnostics on failures**
-  - Add `console`, `errors`, `network requests`, and optional HAR on failure path.
+  - Keep `console`, `errors`, and `network requests` on every failure path.
+  - Add more only if the command exists in the shipped agent-browser binary and is stable in CI.
 
 ## Keep (for now)
 
@@ -154,35 +172,29 @@ This document maps available `agent-browser` commands to current pipeline failur
 
 ## Recommended Integration Plan
 
-## Phase 1 (Immediate, lowest risk)
+## Phase 1
 
-- In `run_ab_stepwise`, replace post-click fixed wait with:
-  - `wait --load domcontentloaded`, then
-  - optional `wait --text <validation>` when condition exists.
-- On click no-match:
-  - try `find role button click --name "<intent>"` and `find text "<intent>" click`.
-  - only then use LLM fallback.
-- On failure:
-  - collect `console`, `errors`, and `network requests`.
+- Keep the current command-first path in `step_runner.py`.
+- Make sure every click step prefers `find testid`, `find role`, `find label`, and `find text` before any LLM fallback.
+- Keep post-click validation on `wait --text` and `wait --url` when the step provides a real success condition.
+- Keep `console`, `errors`, and `network requests` attached to failure results.
 
-## Phase 2 (Reliability + Debuggability)
+## Phase 2
 
-- Replace custom snapshot diff summary with `diff snapshot` output.
-- Start/stop `trace` around each run and persist trace path in run metrics.
-- Add HAR capture for failure cases.
+- Remove any remaining fixed-wait dependence unless animation makes a short fallback necessary.
+- Reduce custom terminal text matching only where `wait --text`, `wait --url`, or `get count` can prove the same condition.
+- Keep snapshot diffs in code until the agent-browser binary exposes a stable native diff command we can rely on in CI.
 
-## Phase 3 (Refactor cleanup)
+## Phase 3
 
-- Remove duplicated custom fallback branches that semantic `find` covers.
-- Reduce custom terminal matcher complexity by moving to command-level checks.
+- Remove duplicated selector heuristics only after we confirm the native `find` commands cover the same accuracy cases.
+- Keep the LLM fallback as a safety net, not the primary selector strategy.
 
 ## Practical Mapping to Current Files
 
 - `app/execution/step_runner.py`
-  - add `find ...` fallback branch before LLM fallback
-  - switch waits to `wait --load/--text`
-  - add diagnostics (`console/errors/network`)
-  - adopt `diff snapshot` for post-click state-change evidence
+  - already uses `find testid/role/label/text`, `wait --load/--text/--url`, `is visible`, `is enabled`, `get count`, `get text`, `console`, `errors`, and `network requests`
+  - keep pruning the last custom branches around terminal fallback and recovery
 
 - `app/browser/agent_browser_cli.py`
   - add thin wrappers for:
@@ -190,7 +202,7 @@ This document maps available `agent-browser` commands to current pipeline failur
     - `wait --text/--url/--load/--fn`
     - `console`, `errors`
     - `network requests`, `network har start/stop`
-    - `diff snapshot`
+    - `diff snapshot` only if the binary actually supports it
 
 - `app/steps/metrics.py`
   - include command-level debug artifact paths/ids:
@@ -198,10 +210,4 @@ This document maps available `agent-browser` commands to current pipeline failur
 
 ## Bottom Line
 
-A large portion of current custom reliability logic can be replaced or simplified by native `agent-browser` commands, especially:
-
-- semantic target recovery (`find ...`)
-- robust waits (`wait --*`)
-- built-in diff and diagnostics (`diff`, `console`, `errors`, `network`, `trace`)
-
-This should improve accuracy and reduce maintenance burden at the same time.
+The biggest safe wins for MVP accuracy are semantic target recovery, command-level validation, and failure diagnostics. We should keep the custom logic only where the agent-browser command set does not yet cover the same reliability signal.

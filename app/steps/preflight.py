@@ -14,6 +14,26 @@ class PreflightResult:
     action: str = "proceed"  # "proceed" | "regenerate" | "abort"
 
 
+def _parse_interaction_hints(contract: Any) -> Dict[str, List[str]]:
+    hints: Dict[str, List[str]] = {"high": [], "low": []}
+    for note in (getattr(contract, "extraction_notes", []) or []):
+        if not isinstance(note, str):
+            continue
+        if note.startswith("interaction_hint_high:"):
+            hint = note.split(":", 1)[1].strip().lower()
+            if hint:
+                hints["high"].append(hint)
+        elif note.startswith("interaction_hint_low:"):
+            hint = note.split(":", 1)[1].strip().lower()
+            if hint:
+                hints["low"].append(hint)
+        elif note.startswith("interaction_hint:"):
+            hint = note.split(":", 1)[1].strip().lower()
+            if hint:
+                hints["high"].append(hint)
+    return hints
+
+
 def preflight_gate(
     steps: List[Dict[str, Any]],
     contract: Optional[Any],
@@ -68,6 +88,7 @@ def preflight_gate(
         (s.get("label") or s.get("selector") or "").lower()
         for s in click_steps
     ]
+    interaction_hints = _parse_interaction_hints(contract)
 
     try:
         for target in contract.targets or []:
@@ -121,6 +142,23 @@ def preflight_gate(
                     f"contract requires '{terminal.value}'"
                 )
 
+        click_before_terminal = None
+        for step in reversed(steps):
+            if step.get("action") == "assert_terminal":
+                continue
+            if step.get("action") == "click":
+                click_before_terminal = step
+                break
+        if click_before_terminal is not None:
+            has_validation = bool(
+                click_before_terminal.get("validation_condition")
+                or click_before_terminal.get("success_condition")
+            )
+            if not has_validation:
+                errors.append(
+                    "Last click before assert_terminal is missing validation metadata"
+                )
+
     # ------------------------------------------------------------------ #
     # Gate 4: not a degenerate plan                                        #
     # ------------------------------------------------------------------ #
@@ -129,6 +167,41 @@ def preflight_gate(
             "Degenerate plan: zero click steps after normalization. "
             "This plan cannot demonstrate any feature."
         )
+
+    # ------------------------------------------------------------------ #
+    # Gate 5: obvious prerequisite setup coverage                         #
+    # ------------------------------------------------------------------ #
+    if interaction_hints["high"] or interaction_hints["low"]:
+        earlier_clicks = click_steps[:-1] if len(click_steps) > 1 else []
+        earlier_labels = [
+            (s.get("label") or s.get("selector") or "").strip().lower()
+            for s in earlier_clicks
+        ]
+        zero_click_plan = len(click_steps) == 0
+        for hint in interaction_hints["high"]:
+            if any(
+                hint == label
+                or (len(hint) > 4 and hint in label)
+                or (len(label) > 4 and label in hint)
+                for label in earlier_labels
+            ):
+                continue
+            message = f"Missing prerequisite setup step implied by contract hint: '{hint}'"
+            if zero_click_plan:
+                warnings.append(message)
+            else:
+                errors.append(message)
+        for hint in interaction_hints["low"]:
+            if any(
+                hint == label
+                or (len(hint) > 4 and hint in label)
+                or (len(label) > 4 and label in hint)
+                for label in earlier_labels
+            ):
+                continue
+            warnings.append(
+                f"Weak prerequisite setup hint not covered explicitly: '{hint}'"
+            )
 
     if errors:
         return PreflightResult(

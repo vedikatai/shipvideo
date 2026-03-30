@@ -8,7 +8,7 @@ source that breaks circular validation.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from app.steps.demo_contract import DemoContract, TargetRef, TerminalCondition
 from app.steps.step_normalizer import _extract_routes_from_diff
@@ -21,6 +21,7 @@ def extract_contract_static(
     start_route = _infer_start_route(diff_files)
     targets = _extract_targets(diff_files)
     terminal = _detect_terminal(diff_files)
+    interaction_hints = _extract_interaction_hints(diff_files)
     
     notes: List[str] = []
     if not start_route:
@@ -30,6 +31,8 @@ def extract_contract_static(
         notes.append("no_targets_extracted")
     if terminal is None:
         notes.append("no_terminal_detected")
+    for confidence, hint in interaction_hints:
+        notes.append(f"interaction_hint_{confidence}:{hint}")
     
     confidence = "high" if (start_route != "/" and targets and terminal) else (
         "medium" if (targets or terminal) else "low"
@@ -73,7 +76,8 @@ def _extract_targets(diff_files: List[Dict[str, str]]) -> List[TargetRef]:
                         label=label,
                         selector=f"[data-testid='{tid}']",
                     ))
-            # Extract button/link text from JSX
+            if not _line_looks_interactive(line):
+                continue
             for m in re.finditer(r'>\s*([A-Z][A-Za-z\s]{2,30})\s*</', line):
                 label = m.group(1).strip()
                 if label not in seen_labels and len(label.split()) <= 5:
@@ -103,3 +107,63 @@ def _detect_terminal(diff_files: List[Dict[str, str]]) -> Optional[TerminalCondi
                         value=text_match.group(1).strip(),
                     )
     return None
+
+
+def _extract_interaction_hints(diff_files: List[Dict[str, str]]) -> List[Tuple[str, str]]:
+    hints: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    high_signal_patterns = (
+        (re.compile(r"\bselect amount\b", re.IGNORECASE), "select amount"),
+        (re.compile(r"\bchoose (plan|tier|option)\b", re.IGNORECASE), "choose option"),
+        (re.compile(r"\b(plan|tier|option) selected\b", re.IGNORECASE), "choose option"),
+        (re.compile(r"\bswitch (tab|tabs)\b", re.IGNORECASE), "switch tab"),
+        (re.compile(r"\bopen (drawer|modal|sheet|panel)\b", re.IGNORECASE), "open panel"),
+        (re.compile(r"\b(toggle|enable|disable) [A-Za-z]", re.IGNORECASE), "toggle option"),
+        (re.compile(r"\b(check|uncheck) [A-Za-z]", re.IGNORECASE), "check option"),
+        (re.compile(r"\bselect [A-Za-z].*(plan|tier|option|amount)\b", re.IGNORECASE), "choose option"),
+    )
+    low_signal_patterns = (
+        (re.compile(r"\bamount\b", re.IGNORECASE), "select amount"),
+        (re.compile(r"\b(tab|tabs)\b", re.IGNORECASE), "switch tab"),
+        (re.compile(r"\b(plan|tier|option)\b", re.IGNORECASE), "choose option"),
+        (re.compile(r"\b(toggle|switch)\b", re.IGNORECASE), "toggle option"),
+        (re.compile(r"\b(checkbox|check)\b", re.IGNORECASE), "check option"),
+        (re.compile(r"\b(radio)\b", re.IGNORECASE), "choose option"),
+        (re.compile(r"\b(drawer|modal|sheet|panel)\b", re.IGNORECASE), "open panel"),
+    )
+
+    for f in diff_files:
+        patch = f.get("patch", "")
+        if not patch:
+            continue
+        for line in patch.split("\n"):
+            if not line.startswith("+"):
+                continue
+            normalized = line[1:].strip()
+            matched = False
+            for pattern, hint in high_signal_patterns:
+                if pattern.search(normalized):
+                    entry = ("high", hint)
+                    if entry not in seen:
+                        seen.add(entry)
+                        hints.append(entry)
+                    matched = True
+                    break
+            if matched:
+                continue
+            for pattern, hint in low_signal_patterns:
+                if pattern.search(normalized):
+                    entry = ("low", hint)
+                    if entry not in seen:
+                        seen.add(entry)
+                        hints.append(entry)
+                    break
+    return hints
+
+
+def _line_looks_interactive(line: str) -> bool:
+    return bool(
+        re.search(r"<\s*(button|a)\b", line, re.IGNORECASE)
+        or re.search(r'role=["\'](button|link|tab|menuitem)["\']', line, re.IGNORECASE)
+        or re.search(r"<\s*[A-Za-z0-9_.:-]*(Button|Link|Tab|Checkbox|Radio)\b", line)
+    )

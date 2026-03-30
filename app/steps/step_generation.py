@@ -84,8 +84,17 @@ _EXTRACTION_JSON_SCHEMA: Dict[str, Any] = {
                 "description": "Ordered visible button/link labels the user must click through.",
                 "items": {"type": "string"},
             },
+            "interaction_hints": {
+                "type": "array",
+                "description": (
+                    "Ordered prerequisite interaction hints inferred from the diff. "
+                    "Use short natural-language phrases like 'select amount' or "
+                    "'choose security option'. Empty array if none are evident."
+                ),
+                "items": {"type": "string"},
+            },
         },
-        "required": ["start_route", "terminal_testid", "click_labels"],
+        "required": ["start_route", "terminal_testid", "click_labels", "interaction_hints"],
         "additionalProperties": False,
     },
 }
@@ -236,6 +245,23 @@ def _run_extraction_phase(
     Phase 1: extract start_route, terminal_testid, click_labels from diff only.
     Returns (extraction_data, cost_usd).
     """
+    interaction_hints: List[str] = []
+    if contract is not None:
+        try:
+            for note in getattr(contract, "extraction_notes", []) or []:
+                if not isinstance(note, str):
+                    continue
+                if note.startswith("interaction_hint_high:") or note.startswith("interaction_hint_low:"):
+                    hint = note.split(":", 1)[1].strip()
+                    if hint:
+                        interaction_hints.append(hint)
+                elif note.startswith("interaction_hint:"):
+                    hint = note.split(":", 1)[1].strip()
+                    if hint:
+                        interaction_hints.append(hint)
+        except Exception:
+            interaction_hints = []
+
     # If contract already has high-confidence data, skip LLM extraction
     if contract is not None:
         try:
@@ -254,6 +280,7 @@ def _run_extraction_phase(
                     "start_route": getattr(contract, "start_route", ""),
                     "terminal_testid": terminal,
                     "click_labels": labels,
+                    "interaction_hints": interaction_hints,
                 }, 0.0
         except Exception:
             pass
@@ -268,7 +295,10 @@ def _run_extraction_phase(
         "the flow completed (look for words like complete, success, done, finish). "
         "Empty string if not found.\n"
         "- click_labels: ordered list of exact visible button/link text the user "
-        "must click to complete the flow. Extract from JSX button/link text only."
+        "must click to complete the flow. Extract from JSX button/link text only.\n"
+        "- interaction_hints: ordered prerequisite setup interactions implied by the "
+        "diff when they are reasonably explicit, such as selecting an amount, "
+        "choosing a tab, toggling an option, or opening a drawer. Use [] when absent."
     )
 
     # Include contract hints if partially available
@@ -285,6 +315,11 @@ def _run_extraction_phase(
                 )
         except Exception:
             pass
+        if interaction_hints:
+            contract_hint += (
+                f"\nKnown prerequisite interaction hints: "
+                f"{json.dumps(interaction_hints)}"
+            )
 
     extraction_user = json.dumps(
         {
@@ -316,7 +351,8 @@ def _run_extraction_phase(
         f"[steps.step_generation] extraction: "
         f"start_route={data.get('start_route')!r} "
         f"terminal={data.get('terminal_testid')!r} "
-        f"labels={data.get('click_labels')}",
+        f"labels={data.get('click_labels')} "
+        f"hints={data.get('interaction_hints')}",
         flush=True,
     )
     return data, cost
@@ -484,6 +520,14 @@ def _build_planning_prompt(
             for lbl in extraction["click_labels"]:
                 lines.append(f'  - "{lbl}"')
             lines.append("Use these exact label strings for click steps.")
+        if extraction.get("interaction_hints"):
+            lines.append("PREREQUISITE INTERACTION HINTS:")
+            for hint in extraction["interaction_hints"]:
+                lines.append(f'  - "{hint}"')
+            lines.append(
+                "If a later click target depends on one of these setup interactions, "
+                "include an explicit earlier step for it."
+            )
         lines.append("=== END EXTRACTED FACTS ===")
         extraction_block = "\n".join(lines)
 
@@ -515,6 +559,7 @@ def _build_planning_prompt(
         "RULES — DO NOT VIOLATE:\n"
         "• First step must be goto to START ROUTE.\n"
         "• Every label in EXPECTED CLICK TARGETS must appear as a click step.\n"
+        "• Every prerequisite interaction hint must be satisfied by an explicit earlier step when relevant.\n"
         "• Do not stop until TERMINAL CONDITION is reachable.\n"
         "• Last meaningful step must be assert_terminal with the terminal condition.\n"
         "• Use ONLY routes from real_routes for goto.\n"
@@ -846,7 +891,13 @@ async def generate_steps_from_diff(
                 f"errors={preflight.errors}",
                 flush=True,
             )
-            preflight_errors = preflight.errors
+            if any(err.startswith("Degenerate plan: zero click steps") for err in preflight.errors):
+                preflight_errors = [
+                    "Degenerate plan: zero click steps after normalization. "
+                    "Regenerate a real demo flow with explicit click steps that reach the required target and terminal condition.",
+                ]
+            else:
+                preflight_errors = preflight.errors
 
             if attempt == 1:
                 # Second attempt also failed — hard abort
