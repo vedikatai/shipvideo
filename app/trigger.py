@@ -20,9 +20,9 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Extension / directory constants (exported so diff_budget.py can import them)
-# ---------------------------------------------------------------------------
+
+
+
 
 UI_EXTENSIONS: frozenset = frozenset({
     ".tsx", ".jsx", ".ts", ".js",
@@ -31,7 +31,7 @@ UI_EXTENSIONS: frozenset = frozenset({
     ".html",
 })
 
-# Patterns that disqualify a path from being a UI file regardless of extension.
+
 NON_UI_PATTERNS: tuple = (
     ".test.", ".spec.", "__tests__",
     ".md",
@@ -39,8 +39,8 @@ NON_UI_PATTERNS: tuple = (
     ".yml", ".yaml",
 )
 
-# Primary UI directories: direct rendered output.
-# Phase 5 (diff_budget) imports this tuple — keep it exported at module level.
+
+
 UI_PRIMARY_DIRS: tuple = (
     "app/", "src/app/",
     "components/", "src/components/",
@@ -49,18 +49,18 @@ UI_PRIMARY_DIRS: tuple = (
     "extensions/", "blocks/",
 )
 
-# Secondary UI directories: UI-adjacent but less likely to directly affect rendering.
+
 _UI_SECONDARY_DIRS: tuple = (
-    "src/",         # catch-all for src/ files not under src/app/, src/components/, etc.
+    "src/",                                                                             
     "layouts/", "src/layouts/",
     "views/", "src/views/",
     "widgets/", "src/widgets/",
 )
 
 
-# ---------------------------------------------------------------------------
-# Classifier helpers
-# ---------------------------------------------------------------------------
+
+
+
 
 def is_ui_file(path: str) -> bool:
     """
@@ -80,7 +80,7 @@ def is_ui_file(path: str) -> bool:
     for d in UI_PRIMARY_DIRS + _UI_SECONDARY_DIRS:
         if path.startswith(d):
             return True
-    # Accept any file in a subdirectory (e.g. "lib/utils.ts"); reject lone root files
+
     return "/" in path
 
 
@@ -104,27 +104,27 @@ def score_file(path: str) -> int:
     for d in _UI_SECONDARY_DIRS:
         if path.startswith(d):
             return 1
-    # File with a UI extension in a subdirectory but outside named dirs
+
     if "/" in path:
         return 1
     return 0
 
 
-# ---------------------------------------------------------------------------
-# TriggerDecision
-# ---------------------------------------------------------------------------
+
+
+
 
 @dataclass
 class TriggerDecision:
     should_run: bool
     reason: str
     matched_files: List[str] = field(default_factory=list)
-    general_demo: bool = False  # True → homepage-only crawl; skip feature-route seeding
+    general_demo: bool = False                                                          
 
 
-# ---------------------------------------------------------------------------
-# evaluate_trigger
-# ---------------------------------------------------------------------------
+
+
+
 
 def _file_magnitude(f: Dict[str, Any]) -> int:
     """

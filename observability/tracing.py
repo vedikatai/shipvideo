@@ -33,7 +33,7 @@ class _NoOpSpanExporter(SpanExporter):
         return True
 
 
-# ContextVar isolates step timings per async context / task; safe with workers and overlapping runs.
+
 _step_timings: contextvars.ContextVar[Optional[List[Tuple[str, float]]]] = contextvars.ContextVar(
     "pipeline_step_timings", default=None
 )
@@ -63,18 +63,18 @@ def _print_pipeline_summary() -> None:
     print("", flush=True)
     print("PIPELINE SUMMARY", flush=True)
     total_ms = 0.0
-    # Simple ANSI colors for human-readable timing:
-    # - green: fast/OK
-    # - red: very slow
+
+
+
     GREEN = "\033[32m"
     RED = "\033[31m"
     RESET = "\033[0m"
 
-    # thresholds in milliseconds
-    SLOW_THRESHOLD_MS = 5000.0  # 5s and above = red
 
-    # Some steps are composite wrappers (they already include the time of nested steps),
-    # so we don't want to count them again in the TOTAL to avoid double-counting.
+    SLOW_THRESHOLD_MS = 5000.0                      
+
+
+
     COMPOSITE_STEPS = {"analyze_pr", "video_pipeline"}
 
     for name, ms in lst:
@@ -91,7 +91,7 @@ def _print_pipeline_summary() -> None:
             line = f"{name:<22} {ms:.1f} ms"
         print(f"{color}{line}{RESET}", flush=True)
 
-    # TOTAL line: use red if total is very large, green otherwise
+
     total_color = RED if total_ms >= SLOW_THRESHOLD_MS else GREEN
     if total_ms >= 1000:
         total_line = f"{'TOTAL':<22} {total_ms / 1000:.1f} s"

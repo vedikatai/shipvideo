@@ -7,9 +7,9 @@ from app.browser.agent_browser_types import RefCandidate, SelectionResult
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot, ExperimentMode
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+
+
+
 
 def _make_candidate(element: AgentBrowserElement, match_type: str) -> RefCandidate:
     """Build a RefCandidate from a normalized AgentBrowserElement."""
@@ -48,14 +48,14 @@ def _log_result(result: SelectionResult) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 — Planning-to-execution bridge
-# ---------------------------------------------------------------------------
 
-# Regex for extracting testid value from CSS selector strings like
-# [data-testid='generate-api-key'] or [data-testid="submit-btn"].
+
+
+
+
+
 _TESTID_RE = re.compile(r"""\[data-testid=['"]([^'"]+)['"]\]""")
-# First #id in a selector (e.g. #nested-lab-open-main, div#foo > span).
+
 _ID_FRAGMENT_RE = re.compile(r"#([\w-]+)")
 
 
@@ -107,15 +107,15 @@ def derive_intent(step: Dict[str, Any]) -> str:
             return _slug_to_intent(m.group(1))
         m_id = _ID_FRAGMENT_RE.search(selector)
         if m_id:
-            # "#nested-lab-open-main" → "nested lab open main"
+
             return _slug_to_intent(m_id.group(1))
 
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+
+
+
 
 def select_ref(
     intent: str,
@@ -158,7 +158,7 @@ def select_ref(
     """
     intent = (intent or "").strip()
 
-    # Guard: empty intent — cannot select anything.
+
     if not intent:
         result = SelectionResult(
             chosen_ref="",
@@ -170,12 +170,12 @@ def select_ref(
         _log_result(result)
         return result
 
-    # Selection is intentionally limited to normalized interactive elements only.
+
     pool = _filter_by_role(list(snapshot["interactive_elements"]), role_filter)
 
-    # ------------------------------------------------------------------
-    # Level 1 — Exact case-sensitive name match
-    # ------------------------------------------------------------------
+
+
+
     exact: List[AgentBrowserElement] = [e for e in pool if e["name"] == intent]
 
     if len(exact) == 1:
@@ -200,9 +200,9 @@ def select_ref(
         _log_result(result)
         return result
 
-    # ------------------------------------------------------------------
-    # Level 2 — Case-insensitive exact name match
-    # ------------------------------------------------------------------
+
+
+
     intent_lower = intent.lower()
     ci: List[AgentBrowserElement] = [
         e for e in pool if e["name"].lower() == intent_lower
@@ -230,9 +230,9 @@ def select_ref(
         _log_result(result)
         return result
 
-    # ------------------------------------------------------------------
-    # Level 3 — Partial match (substring in either direction, case-insensitive)
-    # ------------------------------------------------------------------
+
+
+
     partial: List[AgentBrowserElement] = [
         e
         for e in pool
@@ -261,9 +261,9 @@ def select_ref(
         _log_result(result)
         return result
 
-    # ------------------------------------------------------------------
-    # No match at any level
-    # ------------------------------------------------------------------
+
+
+
     result = SelectionResult(
         chosen_ref="",
         selection_reason="no_match",

@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-# Project root (parent of script if script is in repo root)
+
 ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
 

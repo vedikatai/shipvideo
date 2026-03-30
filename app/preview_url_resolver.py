@@ -84,11 +84,11 @@ def wait_for_preview_ready(
     deadline = time.monotonic() + timeout
     next_log = time.monotonic()
 
-    # Use a robust CA bundle for Python urllib.
-    # Your system/curl trust store may differ from Python's default trust store.
+
+
     ssl_context = None
     try:
-        import certifi  # type: ignore
+        import certifi                
 
         ssl_context = ssl.create_default_context(cafile=certifi.where())
     except Exception:

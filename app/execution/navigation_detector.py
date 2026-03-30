@@ -8,34 +8,34 @@ from typing import Any
 from playwright.sync_api import Page
 
 
-# ---------------------------------------------------------------------------
-# PageFingerprint — structural signals that are stable across minor DOM updates
-# ---------------------------------------------------------------------------
+
+
+
 
 @dataclass
 class PageFingerprint:
-    path: str           # window.location.pathname
-    title: str          # document.title
-    heading_set: str    # sorted, "|"-joined h1+h2 texts (max 5, 60 chars each)
-    landmark_count: int # count of structural landmark elements
-    testid_set: str     # sorted, "|"-joined data-testid values (max 20)
+    path: str                                     
+    title: str                          
+    heading_set: str                                                           
+    landmark_count: int                                        
+    testid_set: str                                                     
 
 
-# ---------------------------------------------------------------------------
-# NavigationState — keeps dom_hash for the stability loop; adds fingerprint
-# for the semantic major-change check
-# ---------------------------------------------------------------------------
+
+
+
+
 
 @dataclass
 class NavigationState:
     path: str
     fingerprint: PageFingerprint
-    dom_hash: str  # kept for wait_stable_after_navigation stability loop only
+    dom_hash: str                                                             
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+
+
+
 
 def _dom_signature(page: Page) -> str:
     """Raw body-text hash — used only by wait_stable_after_navigation."""
@@ -89,13 +89,13 @@ def _collect_page_fingerprint(page: Page) -> PageFingerprint:
     )
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+
+
+
 
 def capture_state(page: Page) -> NavigationState:
     fp = _collect_page_fingerprint(page)
-    dom_hash = _dom_signature(page)  # kept for stability loop
+    dom_hash = _dom_signature(page)                           
     return NavigationState(path=fp.path, fingerprint=fp, dom_hash=dom_hash)
 
 
@@ -148,5 +148,5 @@ def wait_stable_after_navigation(page: Page, timeout_ms: int = 12000) -> None:
             stable_hits = 0
             last_hash = h
         time.sleep(0.2)
-    # bounded best-effort; do not hard-fail here
+
     return

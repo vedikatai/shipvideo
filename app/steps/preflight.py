@@ -1,4 +1,4 @@
-# app/steps/preflight.py  — new file, create it
+
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ class PreflightResult:
     passed: bool
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
-    action: str = "proceed"  # "proceed" | "regenerate" | "abort"
+    action: str = "proceed"                                      
 
 
 def _parse_interaction_hints(contract: Any) -> Dict[str, List[str]]:
@@ -49,7 +49,7 @@ def preflight_gate(
     4. Plan is not degenerate (zero clicks)
     """
     if contract is None:
-        # No contract — unguided run, warn but proceed
+
         return PreflightResult(
             passed=True,
             warnings=["No contract supplied — running unguided"],
@@ -59,9 +59,9 @@ def preflight_gate(
     errors: List[str] = []
     warnings: List[str] = []
 
-    # ------------------------------------------------------------------ #
-    # Gate 1: correct start route                                          #
-    # ------------------------------------------------------------------ #
+
+
+
     start_route = getattr(contract, "start_route", None)
     if start_route:
         first_goto = next(
@@ -75,14 +75,14 @@ def preflight_gate(
                 f"but contract requires '{start_route}'"
             )
 
-    # ------------------------------------------------------------------ #
-    # Gate 2: all required contract targets covered                        #
-    # ------------------------------------------------------------------ #
-    # Important policy:
-    # - If a required target label appears in planned click steps, count it as covered
-    #   even when dom_confirmed=False.
-    # - This trusts extraction/contract labels for conditional UI that may not appear
-    #   in static crawl snapshots until prior interactions are performed.
+
+
+
+
+
+
+
+
     click_steps = [s for s in steps if s.get("action") == "click"]
     click_labels_lower = [
         (s.get("label") or s.get("selector") or "").lower()
@@ -99,8 +99,8 @@ def preflight_gate(
             if not target_label:
                 continue
 
-            # Accept exact / fuzzy label presence in the plan.
-            # Do NOT require dom_confirmed=True here.
+
+
             matched = any(
                 target_label == cl
                 or (len(target_label) > 4 and target_label in cl)
@@ -115,9 +115,9 @@ def preflight_gate(
     except Exception as e:
         warnings.append(f"Could not validate contract targets: {e}")
 
-    # ------------------------------------------------------------------ #
-    # Gate 3: assert_terminal step exists                                  #
-    # ------------------------------------------------------------------ #
+
+
+
     terminal = getattr(contract, "terminal", None)
     if terminal:
         terminal_steps = [s for s in steps if s.get("action") == "assert_terminal"]
@@ -159,18 +159,18 @@ def preflight_gate(
                     "Last click before assert_terminal is missing validation metadata"
                 )
 
-    # ------------------------------------------------------------------ #
-    # Gate 4: not a degenerate plan                                        #
-    # ------------------------------------------------------------------ #
+
+
+
     if len(click_steps) == 0:
         errors.append(
             "Degenerate plan: zero click steps after normalization. "
             "This plan cannot demonstrate any feature."
         )
 
-    # ------------------------------------------------------------------ #
-    # Gate 5: obvious prerequisite setup coverage                         #
-    # ------------------------------------------------------------------ #
+
+
+
     if interaction_hints["high"] or interaction_hints["low"]:
         earlier_clicks = click_steps[:-1] if len(click_steps) > 1 else []
         earlier_labels = [

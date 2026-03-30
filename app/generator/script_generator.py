@@ -18,10 +18,10 @@ import os
 from typing import Any, Dict, List, Optional
 
 try:
-    from openai import OpenAI, BadRequestError  # type: ignore
+    from openai import OpenAI, BadRequestError                
 except Exception:
-    OpenAI = None  # type: ignore
-    BadRequestError = Exception  # type: ignore
+    OpenAI = None                
+    BadRequestError = Exception                
 
 MAX_SCRIPT_RETRIES = 2
 
@@ -89,7 +89,7 @@ def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> s
         if not is_format_err:
             raise
 
-    # Fallback: json_object mode with manual extraction
+
     completion = client.chat.completions.create(
         model=deployment,
         messages=messages,
@@ -226,7 +226,7 @@ def generate_playwright_script(
 
     client = _get_client()
 
-    # Build a compact diff summary (paths + status only, no patch content).
+
     diff_summary = ""
     if diff_files:
         diff_summary = "; ".join(

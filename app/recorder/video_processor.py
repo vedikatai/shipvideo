@@ -41,7 +41,7 @@ def convert_webm_to_mp4(webm_path: Path, output_dir: Path) -> Path:
         "-level", "3.0",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
-        # Ensure audio track is excluded cleanly (Playwright records no audio)
+
         "-an",
         str(mp4_path),
     ]

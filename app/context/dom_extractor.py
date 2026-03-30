@@ -7,9 +7,9 @@ from playwright.sync_api import Page
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot, DomSnapshot
 
 if TYPE_CHECKING:
-    # Imported for type annotations only; avoids pulling in the full browser
-    # sub-package at module load time for callers that only need the Playwright
-    # extractor.  At runtime the import happens inside extract_ab_context().
+
+
+
     from app.browser.agent_browser_cli import AgentBrowserCLI
 
 
@@ -84,7 +84,7 @@ def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
         "routes": sorted(routes),
         "buttons": buttons,
         "links": links,
-        "inputs": [],  # runtime extractor does not query inputs; crawler covers this
+        "inputs": [],                                                                
         "data_testids": dedup_tids,
     }
 
@@ -127,9 +127,9 @@ def extract_ab_context(
         AgentBrowserSnapshot with current_url, snapshot_text,
         interactive_elements, and raw_snapshot_path.
     """
-    # Local import so that modules which import only the Playwright extractor
-    # do not pull in the browser sub-package at module load time.
-    from app.browser.agent_browser_cli import AgentBrowserCLI as _CLI  # noqa: F401
+
+
+    from app.browser.agent_browser_cli import AgentBrowserCLI as _CLI              
 
     print(
         f"[dom_extractor] extract_ab_context: save_raw={save_raw}",

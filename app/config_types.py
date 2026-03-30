@@ -17,7 +17,7 @@ def load_capture_settings() -> CaptureSettings:
     Single source of truth for capture configuration used by both the
     execution layer (step_runner) and the render layer (render.py).
     """
-    from app.config import load_config  # local import to avoid module-level circular dep
+    from app.config import load_config                                                   
 
     cfg = load_config()
     capture_cfg = cfg.get("capture") or {}

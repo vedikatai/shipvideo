@@ -26,7 +26,7 @@ app = FastAPI()
 def on_startup():
     init_tracing()
 
-# CORS for frontend
+
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
@@ -36,16 +36,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# GitHub webhook secret
+
 GITHUB_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "secret")
 
-# Video path
+
 BASE_DIR = Path(__file__).resolve().parent
 VIDEO_PATH = BASE_DIR / "screenshots" / "out.mp4"
 
-# -------------------------
-# Serve video
-# -------------------------
+
+
+
 @app.get("/out.mp4")
 def get_video(request: Request):
     if not VIDEO_PATH.exists():
@@ -84,18 +84,18 @@ def get_video(request: Request):
     }
     return StreamingResponse(iterfile(VIDEO_PATH, start, length), status_code=206, headers=headers)
 
-# -------------------------
-# Budget / spend (Azure or local)
-# -------------------------
+
+
+
 @app.get("/budget-status")
 def budget_status():
     """Return current spend and limit (Azure Cost Management or local). For monitoring."""
     return get_budget_status()
 
 
-# -------------------------
-# GitHub webhook
-# -------------------------
+
+
+
 def verify_signature(signature, payload):
     mac = hmac.new(GITHUB_SECRET.encode(), payload, hashlib.sha256)
     return hmac.compare_digest(f"sha256={mac.hexdigest()}", signature)
@@ -187,7 +187,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     include_prefixes = trigger_cfg.get("include") or ["src/", "app/"]
     exclude_substrings = trigger_cfg.get("exclude") or [".test.", ".spec.", "/tests/", "/test/", "__tests__"]
 
-    # Decide event kind + extract PR context.
+
     pr_number: int | None = None
     pr_title: str | None = None
     pr_branch: str | None = None
@@ -196,7 +196,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
     force: bool = False
     diff_files: list[dict[str, str]] | None = None
 
-    # --- Case A: pull_request event ---
+
     if "pull_request" in event:
         pr = event["pull_request"]
         pr_number = pr.get("number")
@@ -215,7 +215,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         if pr_number is None:
             return {"status": "ignored"}
 
-        # Trigger mode enforcement
+
         if trigger_mode == "on-demand":
             if skip_comment:
                 comment_on_pr(
@@ -230,8 +230,8 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
             return {"status": "skipped"}
 
         if trigger_mode == "smart" and not force:
-            # Lightweight pre-check: fetch PR diffs and count changed lines
-            # for UI-relevant files only.
+
+
             diff_files = fetch_pr_diff(repo_full_name, pr_number)
             changed_lines = 0
             for f in diff_files:
@@ -263,9 +263,9 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                     flush=True,
                 )
 
-    # --- Case B: issue_comment event ---
+
     else:
-        # Only handle comments on PRs.
+
         if not (event.get("comment") and event.get("issue", {}).get("pull_request")):
             print(f"[webhook] ignored event for repo={repo_full_name}", flush=True)
             return {"status": "ignored"}
@@ -284,7 +284,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         force = bool(parsed.get("force", False))
         start_route = parsed.get("route")
 
-        # Fetch PR details to resolve branch/head sha reliably.
+
         token = os.getenv("GITHUB_TOKEN")
         if not token:
             raise ValueError("GITHUB_TOKEN not set in .env")
@@ -293,7 +293,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
         pr_branch = pr_obj.head.ref
         commit_sha = pr_obj.head.sha or ""
 
-    # If we got here, we are starting a pipeline run.
+
     def background_job():
         run_llm_cost_usd = 0.0
         run_budget_status = None
@@ -376,7 +376,7 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         "steps_failed": capture_summary["steps_failed"],
                         "failure_reason": capture_summary.get("failure_reason"),
                         "cost_usd": round(flow.get("llm_cost_usd", 0.0), 4),
-                        # What actually ran: script-first (Playwright generated script) vs stepwise (Playwright or Agent Browser).
+
                         "video_pipeline": {
                             "pipeline": capture_summary.get("pipeline"),
                             "pipeline_branch": capture_summary.get("pipeline_branch"),
@@ -411,9 +411,9 @@ async def webhook(request: Request, x_hub_signature_256: str = Header(...)):
                         extra_note = "**Monthly budget limit reached.** This demo used fallback steps (no LLM)."
                     comment_on_pr(repo_full_name, pr_number, video_url, extra_note=extra_note)
                 except Exception as e:
-                    # Never leave the user with a misleading success state.
+
                     err_text = f"{type(e).__name__}: {e}"
-                    # Keep PR comments concise; full context stays in server logs.
+
                     if len(err_text) > 600:
                         err_text = err_text[:600].rstrip() + "... (truncated)"
                     error_message = (

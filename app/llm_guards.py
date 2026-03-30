@@ -28,11 +28,11 @@ from pathlib import Path
 try:
     import requests
 except ImportError:
-    requests = None  # type: ignore
+    requests = None                
 
-# -----------------------------------------------------------------------------
-# Config (change these for different environments / requirements)
-# -----------------------------------------------------------------------------
+
+
+
 MAX_RESPONSE_TOKENS = 500
 """Cap on Azure response tokens so a single response can't be huge."""
 
@@ -45,7 +45,7 @@ def _resolve_budget_limit() -> float:
         return float(os.getenv("BUDGET_LIMIT", "0"))
     if os.getenv("BUDGET_LIMIT_USD") is not None and os.getenv("BUDGET_LIMIT_USD", "").strip() != "":
         return float(os.getenv("BUDGET_LIMIT_USD", "0"))
-    # Sensible defaults: INR accounts are common for Indian billing; USD fallback otherwise
+
     if BILLING_CURRENCY == "INR":
         return 1500.0
     return 15.0
@@ -54,17 +54,17 @@ def _resolve_budget_limit() -> float:
 BUDGET_LIMIT = _resolve_budget_limit()
 """Budget cap in BILLING_CURRENCY. When Azure MTD spend exceeds this, we skip LLM (month-to-date)."""
 
-# Backward compatibility: old name and tests import BUDGET_LIMIT_USD
+
 BUDGET_LIMIT_USD = BUDGET_LIMIT
 
 MAX_DIFF_CHARS_TO_SKIP_LLM = 12_000
 """If diff payload (after our normal truncation) exceeds this, skip LLM and use fallback."""
 
-# Per-1K-token rates in BILLING_CURRENCY (for local estimates / logs only). Override via env for your model.
-# Defaults are legacy mini-scale; set PRICE_PER_1K_INPUT/OUTPUT to match your Azure list price in INR (or USD).
+
+
 PRICE_PER_1K_INPUT = float(os.getenv("PRICE_PER_1K_INPUT", "0.00015"))
 PRICE_PER_1K_OUTPUT = float(os.getenv("PRICE_PER_1K_OUTPUT", "0.0006"))
-PRICE_PER_1K_INPUT_USD = PRICE_PER_1K_INPUT  # legacy alias
+PRICE_PER_1K_INPUT_USD = PRICE_PER_1K_INPUT                
 PRICE_PER_1K_OUTPUT_USD = PRICE_PER_1K_OUTPUT
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -72,9 +72,9 @@ SPEND_FILE = DATA_DIR / "llm_spend.json"
 DEDUPE_FILE = DATA_DIR / "llm_dedup.json"
 MAX_DEDUPE_ENTRIES = 500
 
-# Toggle to allow/bypass PR+commit dedupe.
-# When LLM_DEDUPE_ENABLED is set to "false", "0", or "no" (case-insensitive),
-# we will always treat runs as new (useful for manual re-triggers of the same PR+commit).
+
+
+
 DEDUPE_ENABLED = os.getenv("LLM_DEDUPE_ENABLED", "true").lower() not in {"false", "0", "no"}
 
 _lock = threading.Lock()
@@ -84,7 +84,7 @@ def format_currency_amount(amount: float, currency: str | None = None) -> str:
     """Format a monetary amount for logs (uses BILLING_CURRENCY by default)."""
     cur = (currency or BILLING_CURRENCY).upper()
     sym = {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(cur, f"{cur} ")
-    # Small per-call estimates need more precision; monthly totals use 2 decimals
+
     if abs(amount) < 10:
         return f"{sym}{amount:.4f}"
     return f"{sym}{amount:.2f}"
@@ -100,12 +100,12 @@ def _azure_configured() -> bool:
     )
 
 
-# Optional: cache Azure spend and credit balance to avoid hitting the API every check
+
 _azure_spend_cache: float | None = None
 _azure_spend_cache_ts: float = 0
 _azure_balance_cache: dict | None = None
 _azure_balance_cache_ts: float = 0
-AZURE_SPEND_CACHE_SECONDS = 300  # 5 min
+AZURE_SPEND_CACHE_SECONDS = 300         
 
 
 def _get_azure_token() -> str | None:
@@ -176,7 +176,7 @@ def fetch_azure_cost_month_to_date() -> float | None:
         if not rows or not rows[0]:
             _azure_spend_cache = 0.0
         else:
-            # First column is cost in subscription billing currency (USD, INR, etc.)
+
             _azure_spend_cache = float(rows[0][0])
         _azure_spend_cache_ts = now
         return _azure_spend_cache
@@ -216,7 +216,7 @@ def fetch_azure_credit_balance() -> dict | None:
         )
         resp.raise_for_status()
         data = resp.json()
-        # Response can be a single object or value array; docs show single balance object
+
         props = data.get("properties") or data
         if isinstance(data.get("value"), list) and len(data["value"]) > 0:
             props = data["value"][0].get("properties") or data["value"][0]

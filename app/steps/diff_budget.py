@@ -18,10 +18,10 @@ from typing import Any, Dict, List, Tuple
 
 from app.trigger import score_file
 
-# Per-tier char budgets
+
 _TIER_BUDGET: Dict[int, int] = {
-    2: 4000,   # primary UI  (app/, pages/, components/, …)
-    1: 1200,   # secondary UI (src/, lib/, utils/, …)
+    2: 4000,                                               
+    1: 1200,                                         
 }
 
 
@@ -54,7 +54,7 @@ def budget_diff_files(
     was_truncated = False
     remaining = total_char_budget
 
-    # Stable sort: score descending; within same score, original order preserved
+
     sorted_files = sorted(
         diff_files,
         key=lambda f: score_file(f.get("path") or ""),
@@ -70,8 +70,8 @@ def budget_diff_files(
         sc = score_file(path)
 
         if sc == 0:
-            # Non-UI file: replace with a single-line stub so the LLM knows
-            # the file changed without consuming char budget for its full diff.
+
+
             budgeted.append({
                 "path": path,
                 "status": status,
@@ -83,11 +83,11 @@ def budget_diff_files(
         alloc = min(per_file_limit, remaining)
 
         if len(original_patch) <= alloc:
-            # Full patch fits within allocation
+
             budgeted.append({"path": path, "status": status, "patch": original_patch})
             remaining -= len(original_patch)
         else:
-            # Truncate to available budget
+
             budgeted.append({"path": path, "status": status, "patch": original_patch[:alloc]})
             remaining = max(0, remaining - alloc)
             was_truncated = True

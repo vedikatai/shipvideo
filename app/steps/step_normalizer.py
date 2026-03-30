@@ -1,4 +1,4 @@
-# app/steps/step_normalizer.py
+
 
 import re
 from typing import Any, Dict, List, Optional, Set
@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional, Set
 
 VALID_ACTIONS = {"goto", "click", "screenshot", "assert_terminal"}
 
-# Validation metadata fields that must survive normalization intact.
-# These are consumed by the AB runner to validate post-click page state.
+
+
 _PASSTHROUGH_FIELDS = (
     "success_condition",
     "validation_condition",
@@ -76,7 +76,7 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             elif selector:
                 base = {"action": "click", "selector": selector}
             else:
-                # No usable target — drop this step, log it
+
                 print(
                     "[step_normalizer] dropped click step: "
                     "no label, text, or selector found",
@@ -84,14 +84,14 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 )
                 continue
 
-            # Preserve validation metadata so the AB runner can enforce
-            # post-click state. Without this every click is unvalidated.
+
+
             for field in _PASSTHROUGH_FIELDS:
                 val = step.get(field)
                 if val is not None:
                     base[field] = val
 
-            # Preserve dom reconciliation annotations for pre-flight gate
+
             for field in ("dom_confirmed", "match_confidence",
                           "dom_warning", "contract_missing"):
                 val = step.get(field)
@@ -113,7 +113,7 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
 
         elif action == "assert_terminal":
-            # Preserve all terminal assertion fields as-is.
+
             terminal_step: Dict[str, Any] = {"action": "assert_terminal"}
             for field in (
                 "condition",
@@ -140,7 +140,7 @@ def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
     for f in diff_files:
         path = f.get("path", "")
 
-        # Next.js app router: app/foo/bar/page.[jt]sx? -> /foo/bar
+
         m = re.match(r"(?:src/)?app/(.+)/page\.[jt]sx?$", path)
         if m:
             route = "/" + m.group(1)
@@ -148,7 +148,7 @@ def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
             routes.add(route)
             continue
 
-        # Next.js pages router: pages/foo/[id].tsx -> /foo/[id]
+
         m = re.match(r"(?:src/)?pages/(.+)\.[jt]sx?$", path)
         if m:
             slug = m.group(1)
@@ -177,9 +177,9 @@ def validate_against_dom(
     - Only drop invalid goto routes
     """
 
-    # ------------------------------------------------------------------ #
-    # Build valid target sets                                             #
-    # ------------------------------------------------------------------ #
+
+
+
     valid_routes: Set[str] = set(dom_data.get("routes") or ["/"])
     valid_routes.add("/")
 
@@ -219,12 +219,12 @@ def validate_against_dom(
         else:
             valid_routes |= inferred
 
-    # Build lowercase set EARLY
+
     valid_texts_lower = {t.lower() for t in valid_texts}
 
-    # ------------------------------------------------------------------ #
-    # Seed contract labels (CRITICAL for conditional UI)                  #
-    # ------------------------------------------------------------------ #
+
+
+
     if contract is not None:
         try:
             for target in contract.targets or []:
@@ -235,24 +235,24 @@ def validate_against_dom(
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ #
-    # Reconcile steps                                                     #
-    # ------------------------------------------------------------------ #
+
+
+
     accepted: List[Dict[str, Any]] = []
 
     for step in steps:
         action = step.get("action")
 
-        # ------------------------------ #
-        # passthrough actions            #
-        # ------------------------------ #
+
+
+
         if action in {"screenshot", "assert_terminal"}:
             accepted.append(step)
             continue
 
-        # ------------------------------ #
-        # goto validation                #
-        # ------------------------------ #
+
+
+
         if action == "goto":
             url = (step.get("url") or "").strip()
             if url and url in valid_routes:
@@ -265,9 +265,9 @@ def validate_against_dom(
                 )
             continue
 
-        # ------------------------------ #
-        # click validation (ANNOTATE ONLY)
-        # ------------------------------ #
+
+
+
         if action == "click":
             selector = (step.get("selector") or "").strip()
             selector_norm = _normalize_selector_quotes(selector) if selector else ""
@@ -325,9 +325,9 @@ def validate_against_dom(
             accepted.append(annotated)
             continue
 
-        # ------------------------------ #
-        # unknown action                 #
-        # ------------------------------ #
+
+
+
         accepted.append(step)
 
     return accepted

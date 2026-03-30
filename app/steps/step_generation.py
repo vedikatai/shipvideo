@@ -1,4 +1,4 @@
-# app/steps/step_generation.py — full file, replace entirely
+
 
 """
 Step generation: produce a grounded list of capture steps (and narration) from
@@ -41,26 +41,26 @@ from observability import pipeline_step
 try:
     from app.steps.errors import ContractIntegrityError
 except ImportError:
-    ContractIntegrityError = RuntimeError  # type: ignore
+    ContractIntegrityError = RuntimeError                
 
 try:
     from observability.tracing import record_contract_integrity_error
 except ImportError:
-    def record_contract_integrity_error(*a, **kw) -> None:  # type: ignore
+    def record_contract_integrity_error(*a, **kw) -> None:                
         pass
 
 try:
-    from openai import OpenAI, BadRequestError  # type: ignore
+    from openai import OpenAI, BadRequestError                
 except Exception:
-    OpenAI = None  # type: ignore
-    BadRequestError = Exception  # type: ignore
+    OpenAI = None                
+    BadRequestError = Exception                
 
 FALLBACK_STEPS: List[Dict[str, Any]] = [{"action": "screenshot"}]
 
 
-# ------------------------------------------------------------------ #
-# JSON schemas                                                         #
-# ------------------------------------------------------------------ #
+
+
+
 
 _EXTRACTION_JSON_SCHEMA: Dict[str, Any] = {
     "name": "extraction",
@@ -161,9 +161,9 @@ _DEMO_FLOW_JSON_SCHEMA: Dict[str, Any] = {
 }
 
 
-# ------------------------------------------------------------------ #
-# LLM caller                                                           #
-# ------------------------------------------------------------------ #
+
+
+
 
 def _call_llm(
     client: Any,
@@ -229,9 +229,9 @@ def _call_llm(
     return completion, json.loads(content)
 
 
-# ------------------------------------------------------------------ #
-# Extraction phase                                                     #
-# ------------------------------------------------------------------ #
+
+
+
 
 def _run_extraction_phase(
     client: Any,
@@ -262,7 +262,7 @@ def _run_extraction_phase(
         except Exception:
             interaction_hints = []
 
-    # If contract already has high-confidence data, skip LLM extraction
+
     if contract is not None:
         try:
             if (
@@ -301,7 +301,7 @@ def _run_extraction_phase(
         "choosing a tab, toggling an option, or opening a drawer. Use [] when absent."
     )
 
-    # Include contract hints if partially available
+
     contract_hint = ""
     if contract is not None:
         try:
@@ -358,9 +358,9 @@ def _run_extraction_phase(
     return data, cost
 
 
-# ------------------------------------------------------------------ #
-# Helpers                                                              #
-# ------------------------------------------------------------------ #
+
+
+
 
 def _fallback_narration(pr_title: Optional[str]) -> str:
     if pr_title:
@@ -413,7 +413,7 @@ def _inject_terminal_assertion(
     if has_terminal:
         return steps
 
-    # Find last click step and insert assert_terminal after it
+
     last_click_idx = None
     for i in range(len(steps) - 1, -1, -1):
         if steps[i].get("action") == "click":
@@ -581,7 +581,7 @@ def _build_planning_prompt(
             "real_links": real_links,
             "real_inputs": real_inputs,
             "data_testids": real_data_testids,
-            # Include budgeted diff for context but not as primary signal
+
             "diff_summary": diff_text[:2000] if diff_text else "",
         },
         ensure_ascii=False,
@@ -590,9 +590,9 @@ def _build_planning_prompt(
     return system_msg, user_msg
 
 
-# ------------------------------------------------------------------ #
-# Main entry point                                                     #
-# ------------------------------------------------------------------ #
+
+
+
 
 @pipeline_step("step_generation")
 async def generate_steps_from_diff(
@@ -636,9 +636,9 @@ async def generate_steps_from_diff(
         if start_route and start_route != "/":
             allowed_routes_override = {start_route}
 
-        # ---------------------------------------------------------- #
-        # Config + seed routes                                         #
-        # ---------------------------------------------------------- #
+
+
+
         config = load_config()
         route_map: Dict[str, Any] = config.get("routeMap") or {}
         app_hints: Any = config.get("appHints") or ""
@@ -671,9 +671,9 @@ async def generate_steps_from_diff(
         if allowed_routes_override:
             seed_routes = [r for r in seed_routes if r in allowed_routes_override]
 
-        # ---------------------------------------------------------- #
-        # DOM crawl                                                    #
-        # ---------------------------------------------------------- #
+
+
+
         dom_data = await crawl_dom_data(staging_url, seed_routes=seed_routes)
         real_routes = dom_data.get("routes") or ["/"]
 
@@ -712,9 +712,9 @@ async def generate_steps_from_diff(
                 "llm_cost_usd": 0.0,
             }
 
-        # ---------------------------------------------------------- #
-        # Azure client                                                 #
-        # ---------------------------------------------------------- #
+
+
+
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         azure_key = os.getenv("AZURE_OPENAI_API_KEY")
         azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
@@ -726,9 +726,9 @@ async def generate_steps_from_diff(
             base_url = base_url + "/openai/v1/"
         client = OpenAI(base_url=base_url, api_key=azure_key)
 
-        # ---------------------------------------------------------- #
-        # Phase 1: Extraction                                          #
-        # ---------------------------------------------------------- #
+
+
+
         extraction, extraction_cost = _run_extraction_phase(
             client,
             azure_deployment,
@@ -739,15 +739,15 @@ async def generate_steps_from_diff(
         )
         total_cost += extraction_cost
 
-        # Override start_route from extraction if not explicitly provided
+
         if not start_route and extraction.get("start_route"):
             start_route = extraction["start_route"].strip()
             if start_route and start_route != "/":
                 allowed_routes_override = {start_route}
 
-        # ---------------------------------------------------------- #
-        # Phase 2: Planning (with optional replan on preflight fail)   #
-        # ---------------------------------------------------------- #
+
+
+
         preflight_errors: Optional[List[str]] = None
 
         for attempt in range(2):
@@ -786,14 +786,14 @@ async def generate_steps_from_diff(
 
             steps = data.get("steps") or FALLBACK_STEPS
 
-            # Ensure at least one screenshot
+
             if not any(
                 isinstance(s, dict) and s.get("action") == "screenshot"
                 for s in steps
             ):
                 steps.append({"action": "screenshot"})
 
-            # Enforce start route
+
             if start_route and start_route != "/":
                 goto_step = {
                     "action": "goto",
@@ -808,12 +808,12 @@ async def generate_steps_from_diff(
                 ).strip() != start_route:
                     steps = [goto_step] + steps
 
-            # Inject terminal assertion from contract
+
             steps = _inject_terminal_assertion(steps, contract)
-            # Inject validation metadata on the last critical click.
+
             steps = _inject_click_validation_from_terminal(steps, contract)
 
-            # DOM reconciliation (annotates, does not drop clicks)
+
             dom_grounded = validate_against_dom(
                 steps,
                 dom_data,
@@ -832,9 +832,9 @@ async def generate_steps_from_diff(
 
             normalized = _ensure_screenshots_for_visited_pages(normalized)
 
-            # -------------------------------------------------- #
-            # Normalization integrity check                        #
-            # -------------------------------------------------- #
+
+
+
             norm_click_idx = 0
             for raw_step in validated:
                 if raw_step.get("action") != "click":
@@ -873,9 +873,9 @@ async def generate_steps_from_diff(
                         )
                 norm_click_idx += 1
 
-            # -------------------------------------------------- #
-            # Pre-flight gate                                      #
-            # -------------------------------------------------- #
+
+
+
             preflight = preflight_gate(normalized, contract)
 
             if preflight.passed:
@@ -900,7 +900,7 @@ async def generate_steps_from_diff(
                 preflight_errors = preflight.errors
 
             if attempt == 1:
-                # Second attempt also failed — hard abort
+
                 record_contract_integrity_error(
                     stage="preflight",
                     reason="; ".join(preflight.errors),
@@ -946,7 +946,7 @@ async def generate_steps_from_diff(
         }
 
     except ContractIntegrityError:
-        raise  # Do not swallow — let pipeline handle it
+        raise                                           
 
     except Exception as e:
         print(

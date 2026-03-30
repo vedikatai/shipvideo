@@ -55,23 +55,23 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from app.dom_schema import SuccessCondition
 
-# ---------------------------------------------------------------------------
-# Artifact directories
-# ---------------------------------------------------------------------------
 
-#: Root for per-run experiment artifacts: app/data/experiment_runs/<run_id>/
+
+
+
+
 _RUNS_DIR = Path(__file__).resolve().parent.parent / "data" / "experiment_runs"
 
-#: Optional test-suite JSON override: app/data/test_suite.json
+
 _TEST_SUITE_PATH = Path(__file__).resolve().parent.parent / "data" / "test_suite.json"
 
-#: Phase 5 aggregate experiment summary written at the root runs dir.
+
 _EXPERIMENT_SUMMARY_PATH = _RUNS_DIR / "experiment_summary.json"
 
 
-# ---------------------------------------------------------------------------
-# Phase 4 — Test suite types (Key Task 1)
-# ---------------------------------------------------------------------------
+
+
+
 
 class TestCase(TypedDict):
     """
@@ -96,13 +96,13 @@ class TestCase(TypedDict):
     success_condition: SuccessCondition
 
 
-# ---------------------------------------------------------------------------
-# Fixed test suite — 5 required categories (Phase 4, Key Task 1)
-#
-# These are placeholder definitions using common UI patterns.
-# Replace with real values for your preview URL by creating:
-#     app/data/test_suite.json   (JSON array of TestCase dicts)
-# ---------------------------------------------------------------------------
+
+
+
+
+
+
+
 
 FIXED_TEST_SUITE: List[TestCase] = [
     {
@@ -235,18 +235,18 @@ def load_test_suite(json_path: Optional[Path] = None) -> List[TestCase]:
     return FIXED_TEST_SUITE
 
 
-# ---------------------------------------------------------------------------
-# Phase 4 — Failure taxonomy
-# ---------------------------------------------------------------------------
 
-#: Canonical failure categories from section 13 of the integration plan.
+
+
+
+
 FailureTaxonomy = Literal[
     "NO_MATCH", "AMBIGUOUS", "WRONG_CLICK", "CLICK_FAILED", "TIMEOUT", "STALE_REF"
 ]
 
-#: Maps runner step outcome strings to the Phase 4 failure taxonomy.
-#: Supports both exact matches and prefix-matched compound strings
-#: (e.g. "goto_failed:/billing" → "CLICK_FAILED").
+
+
+
 _OUTCOME_TO_TAXONOMY: Dict[str, str] = {
     "no_match":            "NO_MATCH",
     "no_intent":           "NO_MATCH",
@@ -282,14 +282,14 @@ def normalize_failure_taxonomy(outcome: str) -> str:
             return taxonomy
     if outcome.startswith("validation_failed"):
         return "CLICK_FAILED"
-    return "CLICK_FAILED"  # catch-all for unrecognised failure strings
+    return "CLICK_FAILED"                                              
 
 
-# ---------------------------------------------------------------------------
-# Phase 4 — Run log schema (matches section 13 of the integration plan)
-# ---------------------------------------------------------------------------
 
-#: Final experiment run outcome (Phase 5 machine-readable categories).
+
+
+
+
 FinalOutcome = Literal["passed", "ambiguous", "regressed", "inconclusive"]
 
 
@@ -312,9 +312,9 @@ class StepTrace(TypedDict):
     selection_reason: str
     candidate_count: int
     action: str
-    result: str               # "success" | "failure" | "ambiguous"
-    failure_reason: str       # "" on success
-    failure_taxonomy: str     # FailureTaxonomy or "" on success
+    result: str                                                    
+    failure_reason: str                      
+    failure_taxonomy: str                                       
     url_before: str
     url_after: str
     state_changed: bool
@@ -339,7 +339,7 @@ class RunTrace(TypedDict):
     backend: str
     mode: str
     test_case_id: str
-    created_at: str           # ISO-8601 UTC timestamp
+    created_at: str                                   
     steps: List[StepTrace]
     final_outcome: FinalOutcome
     metrics: Dict[str, Any]
@@ -421,7 +421,7 @@ class ComparisonReport(TypedDict):
 
     playwright: RunSummary
     agent_browser_cli: RunSummary
-    winner: str               # "playwright" | "agent_browser_cli" | "tie" | "inconclusive"
+    winner: str                                                                            
     decision_outcome: FinalOutcome
     threshold_checks: ThresholdChecks
     notes: List[str]
@@ -436,9 +436,9 @@ class ExperimentSummary(TypedDict):
     mode_summaries: List[ModeSummary]
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+
+
+
 
 def _compute_metrics(
     steps: List[StepTrace],
@@ -489,7 +489,7 @@ def _coerce_final_outcome(runner_result: Dict[str, Any]) -> FinalOutcome:
     """Normalize runner final_outcome into the logger's Phase 5 categories."""
     value = str(runner_result.get("final_outcome") or "").strip().lower()
     if value in {"passed", "ambiguous", "regressed", "inconclusive"}:
-        return value  # type: ignore[return-value]
+        return value                              
 
     success = bool(runner_result.get("success"))
     failure_reason = str(runner_result.get("failure_reason") or "").lower()
@@ -540,9 +540,9 @@ def _target_selection_failure_count(metrics: Dict[str, Any]) -> int:
     return sum(int(counts.get(key, 0)) for key in _TARGET_SELECTION_FAILURES)
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+
+
+
 
 class ExperimentLogger:
     """
@@ -664,10 +664,10 @@ class ExperimentLogger:
             )
             step_traces.append(trace)
 
-        # Determine final outcome from runner result.
+
         final_outcome = _coerce_final_outcome(runner_result)
 
-        # Retries are pre-computed by the runner and stored in metrics dict.
+
         retries = float(
             (runner_result.get("metrics") or {}).get("retries_per_run", 0)
         )
@@ -788,7 +788,7 @@ def compare_runs(
             f"Avg step latency — Playwright: {pw_lat:.0f}ms  AB: {ab_lat:.0f}ms"
         )
 
-    # Per-taxonomy failure comparison.
+
     all_taxonomies = set(playwright_summary["failure_type_counts"]) | set(
         ab_summary["failure_type_counts"]
     )
@@ -874,7 +874,7 @@ def load_run_summaries(runs_dir: Path = _RUNS_DIR) -> List[RunSummary]:
             mtime = path.stat().st_mtime
             prev = latest_by_key.get(key)
             if prev is None or mtime >= prev[0]:
-                latest_by_key[key] = (mtime, summary)  # type: ignore[assignment]
+                latest_by_key[key] = (mtime, summary)                            
         except Exception as exc:
             print(
                 f"[experiment_logger] WARNING: failed to load {path}: {exc}",

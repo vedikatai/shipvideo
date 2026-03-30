@@ -21,10 +21,10 @@ from typing import List, Literal, Optional
 class TargetRef:
     """One expected click target that the demo must reach."""
 
-    label: str          # Visible label or accessible name expected in the UI
-    selector: str = ""  # Optional CSS selector (data-testid preferred)
-    role: str = ""      # Expected ARIA role, e.g. "button" or "link"
-    required: bool = True  # If True, missing this target is a preflight failure
+    label: str                                                               
+    selector: str = ""                                                 
+    role: str = ""                                                   
+    required: bool = True                                                       
 
 
 @dataclass
@@ -32,24 +32,24 @@ class TerminalCondition:
     """How to verify the demo run completed its objective."""
 
     type: Literal["url_match", "text_present", "element_present"]
-    value: str  # String to match against the post-run page state
+    value: str                                                   
 
 
 @dataclass
 class DemoContract:
     """Authoritative runtime definition of what one demo run must accomplish."""
 
-    start_route: str                    # The URL path the demo must start from
-    targets: List[TargetRef]            # Ordered click targets the plan must cover
-    terminal: Optional[TerminalCondition]  # Completion assertion; None if undetectable
+    start_route: str                                                           
+    targets: List[TargetRef]                                                       
+    terminal: Optional[TerminalCondition]                                              
 
     contract_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     confidence: Literal["high", "medium", "low"] = "low"
 
-    # Provenance — how was this contract built?
-    source_static: bool = False         # Built from static diff analysis
-    source_extraction_llm: bool = False  # Supplemented by LLM extraction call
-    agreement_score: float = 0.0       # 0..1 agreement between sources
+
+    source_static: bool = False                                          
+    source_extraction_llm: bool = False                                       
+    agreement_score: float = 0.0                                       
     extraction_notes: List[str] = field(default_factory=list)
 
     def is_runnable(self) -> bool:

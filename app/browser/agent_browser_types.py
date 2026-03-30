@@ -71,22 +71,22 @@ class SnapshotPayload(TypedDict):
     refs: Dict[str, Any]
 
 
-# ---------------------------------------------------------------------------
-# Phase 2 — Deterministic ref-selection types
-# ---------------------------------------------------------------------------
 
-#: Why select_ref() succeeded or failed on a given intent.
-#:
-#:  "exact_match"            — element name == intent (case-sensitive).
-#:  "case_insensitive_match" — element name matches intent ignoring case
-#:                             (and is not an exact case-sensitive match).
-#:  "partial_match"          — intent is a substring of element name, or
-#:                             element name is a substring of intent
-#:                             (case-insensitive; not a full exact match).
-#:  "ambiguous"              — multiple elements matched at the same waterfall
-#:                             level; chosen_ref is "" in this case.
-#:  "no_match"               — no element matched at any level;
-#:                             chosen_ref is "" in this case.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 SelectionReason = Literal[
     "exact_match",
     "case_insensitive_match",

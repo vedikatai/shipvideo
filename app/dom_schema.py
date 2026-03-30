@@ -29,69 +29,69 @@ from typing import Dict, List, Literal, TypedDict
 
 
 class ButtonCandidate(TypedDict):
-    text: str      # visible innerText, stripped, max 100 chars
-    testid: str    # data-testid attribute value or ""
-    aria: str      # aria-label attribute value or ""
-    title: str     # title attribute value or "" — display-only, not for selectors
-    id: str        # element id or ""
-    role: str      # element role (button, submit, etc.)
-    selector: str  # derived CSS selector; "" when not applicable
+    text: str                                                  
+    testid: str                                       
+    aria: str                                        
+    title: str                                                                    
+    id: str                          
+    role: str                                           
+    selector: str                                                
 
 
 class LinkCandidate(TypedDict):
-    text: str    # visible innerText, stripped, max 100 chars
-    href: str    # raw href attribute or ""
-    testid: str  # data-testid attribute value or ""
-    aria: str    # aria-label attribute value or ""
-    id: str      # element id or ""
+    text: str                                                
+    href: str                              
+    testid: str                                     
+    aria: str                                      
+    id: str                        
 
 
 class InputCandidate(TypedDict):
-    placeholder: str  # placeholder attribute or ""
-    name: str         # name attribute or ""
-    input_type: str   # type attribute (text, email, password, etc.) or ""
-    testid: str       # data-testid attribute value or ""
-    aria: str         # aria-label attribute value or ""
-    id: str           # element id or ""
+    placeholder: str                               
+    name: str                               
+    input_type: str                                                       
+    testid: str                                          
+    aria: str                                           
+    id: str                             
 
 
 class TestIdCandidate(TypedDict):
-    testid: str  # data-testid attribute value
-    tag: str     # lowercase HTML tag name
-    text: str    # visible innerText, stripped, max 80 chars
+    testid: str                               
+    tag: str                              
+    text: str                                               
 
 
 class DomSnapshot(TypedDict):
-    current_path: str               # window.location.pathname
-    routes: List[str]               # all known internal routes
+    current_path: str                                         
+    routes: List[str]                                          
     buttons: List[ButtonCandidate]
     links: List[LinkCandidate]
     inputs: List[InputCandidate]
     data_testids: List[TestIdCandidate]
 
 
-# ---------------------------------------------------------------------------
-# Agent Browser experiment types — Phase 1 / Phase 2
-# ---------------------------------------------------------------------------
 
-#: Which experiment execution mode is active for a given run.
-#:
-#:  "deterministic"          — Mode A: ref selection uses only the deterministic
-#:                             waterfall (exact → case-insensitive → partial).
-#:                             Required for all baseline comparison runs.
-#:
-#:  "deterministic_plus_llm" — Mode B: deterministic waterfall first; LLM
-#:                             fallback when no deterministic match is found.
-#:                             Must be logged explicitly; never mixed with Mode A
-#:                             baseline results.
-#:
-#: Defined here (not in app.browser) so that dom_extractor, step_execution,
-#: and ref_selector can all import from a single stable location without
-#: taking a dependency on the browser sub-package.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ExperimentMode = Literal["deterministic", "deterministic_plus_llm"]
 
-#: Explicit post-click validation condition used by Priority 1 structured
-#: success validation in the Agent Browser runner.
+
+
 SuccessConditionType = Literal["url_match", "text_present", "element_present"]
 
 

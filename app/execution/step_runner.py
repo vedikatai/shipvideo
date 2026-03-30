@@ -24,19 +24,19 @@ from app.llm.retry_engine import regenerate_with_feedback
 from app.policy.selector_validator import validate_step_against_dom
 from observability import record_agent_browser_diagnostics
 
-# ---------------------------------------------------------------------------
-# Phase 3 — AB runner loop controls (hard limits, never configurable below these)
-# ---------------------------------------------------------------------------
 
-#: Maximum steps processed by run_ab_stepwise in a single invocation.
+
+
+
+
 MAX_STEPS_PER_RUN: int = 10
 
-#: Maximum per-step attempts for stale-ref recovery (initial try + one retry).
+
 MAX_RETRIES_PER_STEP: int = 2
 MAX_AB_REPLANS_PER_RUN: int = 1
 
-# Agent Browser settle timeouts. The runner prefers command-level readiness
-# signals and only falls back to weaker command-level readiness when needed.
+
+
 AB_DOMCONTENTLOADED_TIMEOUT_S: int = 15
 AB_NETWORKIDLE_TIMEOUT_S: int = 8
 AB_VALIDATION_WAIT_TIMEOUT_S: int = 8
@@ -337,7 +337,7 @@ def _resolve_ab_click_target(
                 })
                 return resolved
 
-    sel = select_ref(intent, snapshot, mode=mode)  # type: ignore[arg-type]
+    sel = select_ref(intent, snapshot, mode=mode)                          
     resolved.update({
         "chosen_ref": sel["chosen_ref"],
         "selection_reason": sel["selection_reason"],
@@ -667,7 +667,7 @@ def _snapshot_has_intent(
         return False
     from app.browser.ref_selector import select_ref
 
-    selected = select_ref(intent, snapshot, mode=mode)  # type: ignore[arg-type]
+    selected = select_ref(intent, snapshot, mode=mode)                          
     return bool(selected.get("chosen_ref"))
 
 
@@ -1095,7 +1095,7 @@ def run_stepwise(
     results: List[Dict[str, Any]] = []
     queue: List[Dict[str, Any]] = list(initial_steps)
     shot_idx = 1
-    total_retries = 0  # Phase 4: accumulates all regeneration attempts
+    total_retries = 0                                                  
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -1107,11 +1107,11 @@ def run_stepwise(
         i = 0
         while i < len(queue):
             step = queue[i]
-            _step_t0 = time.monotonic()  # Phase 4: per-step timing start
+            _step_t0 = time.monotonic()                                  
 
             ok, reason = validate_step_against_dom(step, dom_ctx, page=page)
             if not ok:
-                # regenerate immediately using fresh DOM
+
                 regenerated, attempts = regenerate_with_feedback(
                     objective=objective,
                     dom_context=dom_ctx,
@@ -1119,7 +1119,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts  # Phase 4
+                total_retries += attempts           
                 _log("step.regenerated_on_validation_failure", {"index": i, "reason": reason, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1148,7 +1148,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts  # Phase 4
+                total_retries += attempts           
                 _log("step.regenerated_on_execution_failure", {"index": i, "error": err, "attempts": attempts})
                 if not regenerated:
                     browser.close()
@@ -1167,7 +1167,7 @@ def run_stepwise(
                 queue[i : i + 1] = regenerated
                 continue
 
-            _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)  # Phase 4
+            _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)           
             results.append({"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms})
 
             now = capture_state(page)
@@ -1175,7 +1175,7 @@ def run_stepwise(
             if nav_changed:
                 wait_stable_after_navigation(page)
                 dom_ctx = extract_dom_context(page)
-                # Mandatory re-anchoring: regenerate remaining steps from fresh DOM only.
+
                 remaining_objective = {**objective, "remaining_from_index": i + 1}
                 regenerated, attempts = regenerate_with_feedback(
                     objective=remaining_objective,
@@ -1184,7 +1184,7 @@ def run_stepwise(
                     max_attempts=max_retries_per_failure,
                     page=page,
                 )
-                total_retries += attempts  # Phase 4
+                total_retries += attempts           
                 _log("navigation.reanchored", {"index": i, "attempts": attempts})
                 if regenerated:
                     queue = queue[: i + 1] + regenerated
@@ -1202,9 +1202,9 @@ def run_stepwise(
     }
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 — Agent Browser CLI execution path
-# ---------------------------------------------------------------------------
+
+
+
 
 def _detect_state_change(
     url_before: str,
@@ -1298,8 +1298,8 @@ def run_ab_stepwise(
         session            — agent-browser session name; use a unique value
                              per concurrent job for isolation.
     """
-    # Local imports: avoid pulling in the browser sub-package for callers that
-    # only use run_stepwise (Playwright path).
+
+
     from app.browser.agent_browser_cli import AgentBrowserCLI, AgentBrowserError
     from app.browser.ref_selector import derive_intent
     from app.context.dom_extractor import extract_ab_context
@@ -1313,9 +1313,9 @@ def run_ab_stepwise(
     queue: List[Dict[str, Any]] = list(initial_steps[:max_steps_per_run])
     steps_succeeded = 0
     shot_idx = 1
-    # Tracks the last (url, chosen_ref) pair to detect stuck loops.
+
     last_action_key: Optional[str] = None
-    _total_retries = 0  # Phase 4: total click-step retry attempts across all steps
+    _total_retries = 0                                                             
     _replans_used = 0
 
     _log("ab_runner.start", {
@@ -1336,7 +1336,7 @@ def run_ab_stepwise(
         while step_idx < len(queue) and step_idx < max_steps_per_run:
             step = queue[step_idx]
             action = step.get("action")
-            _step_t0 = time.monotonic()  # Phase 4: per-step timing start
+            _step_t0 = time.monotonic()                                  
             step_result: Dict[str, Any] = {
                 "index": step_idx,
                 "step": step,
@@ -1346,9 +1346,9 @@ def run_ab_stepwise(
                 "mode": mode,
             }
 
-            # ------------------------------------------------------------------
-            # goto — navigate to a new URL within the session
-            # ------------------------------------------------------------------
+
+
+
             if action == "goto":
                 url = step.get("url") or "/"
                 full_url = _resolve_url(preview_url, url)
@@ -1358,7 +1358,7 @@ def run_ab_stepwise(
                     step_result["session_viewport"] = session_config
                     step_result.update({"status": "ok", "outcome": "success"})
                     steps_succeeded += 1
-                    last_action_key = None  # navigation resets repeat detection
+                    last_action_key = None                                      
                 except AgentBrowserError as exc:
                     step_result.update({"outcome": "click_failed", "error": str(exc)})
                     _attach_ab_failure_diagnostics(cli, step_result)
@@ -1382,16 +1382,16 @@ def run_ab_stepwise(
                 step_idx += 1
                 continue
 
-            # ------------------------------------------------------------------
-            # screenshot — capture current page to disk
-            # ------------------------------------------------------------------
+
+
+
             if action == "screenshot":
                 path = screenshot_dir / f"shot{shot_idx}.png"
                 try:
                     cli.screenshot(path)
                     shot_idx += 1
                 except AgentBrowserError:
-                    pass  # screenshot failure is non-fatal; log implicitly via cli
+                    pass                                                           
                 step_result.update({"status": "ok", "outcome": "success"})
                 steps_succeeded += 1
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
@@ -1399,9 +1399,9 @@ def run_ab_stepwise(
                 step_idx += 1
                 continue
 
-            # ------------------------------------------------------------------
-            # assert_terminal — check final terminal condition on current snapshot
-            # ------------------------------------------------------------------
+
+
+
             if action == "assert_terminal":
                 condition = step.get("condition") or {}
                 expected_element = (
@@ -1486,9 +1486,9 @@ def run_ab_stepwise(
                 step_idx += 1
                 continue
 
-            # ------------------------------------------------------------------
-            # click — core AB execution loop
-            # ------------------------------------------------------------------
+
+
+
             if action == "click":
                 intent = derive_intent(step)
                 if not intent:
@@ -1751,14 +1751,14 @@ def run_ab_stepwise(
                     })
                     break
 
-                # End of retry loop.
+
                 if runtime_recovered:
                     continue
                 _total_retries += max(attempts_used - 1, 0)
                 step_result["outcome"] = outcome
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
 
-                # Fatal outcomes: stop the run immediately.
+
                 _FATAL_OUTCOMES = frozenset({
                     "click_failed",
                     "stale_ref",
@@ -1793,9 +1793,9 @@ def run_ab_stepwise(
                 step_idx += 1
                 continue
 
-            # ------------------------------------------------------------------
-            # Unknown action — skip with warning; never fatal
-            # ------------------------------------------------------------------
+
+
+
             step_result.update({"outcome": "click_failed", "status": "failed", "error": f"unknown_action:{action}"})
             _attach_ab_failure_diagnostics(cli, step_result)
             step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
@@ -1813,7 +1813,7 @@ def run_ab_stepwise(
                 "results": results,
                 "metrics": _build_metrics(results, len(initial_steps), _total_retries),
             }
-        # while loop end
+
 
     except AgentBrowserError as exc:
         _log("ab_runner.fatal_error", {"error": str(exc)})
@@ -1830,7 +1830,7 @@ def run_ab_stepwise(
             "metrics": _build_metrics(results, len(initial_steps), _total_retries),
         }
     finally:
-        # Always close the browser session — runs even on early returns.
+
         try:
             cli.close()
         except Exception:

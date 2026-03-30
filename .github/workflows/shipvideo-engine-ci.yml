@@ -12,23 +12,17 @@ jobs:
       contents: read
       issues: write
     env:
-      # Required for GitHub PR diff + PR comment
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Required for step generation (Azure OpenAI)
       AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
       AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
       AZURE_OPENAI_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_DEPLOYMENT }}
 
-      # Optional: only needed if visual fallback is triggered
       AZURE_OPENAI_VISION_DEPLOYMENT: ${{ secrets.AZURE_OPENAI_VISION_DEPLOYMENT }}
 
-      # Default capture is Agent Browser + stepwise; CI has no agent-browser binary — use Playwright stepwise.
       BROWSER_BACKEND: playwright
       VIDEO_PIPELINE: stepwise
 
-      # Use R2 upload in CI only if you want PR comment URLs to point to real storage.
-      # This workflow uploads artifacts regardless.
       SHIPVIDEO_UPLOAD_R2: "false"
 
     steps:
@@ -57,7 +51,6 @@ jobs:
 
       - name: Run demo recording pipeline
         env:
-          # Pass PR context to the pipeline runner.
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           REPO_FULL_NAME: ${{ github.repository }}
@@ -78,4 +71,3 @@ jobs:
             app/screenshots/debug/*.json
             app/data/pipeline_run_summary.json
           if-no-files-found: warn
-

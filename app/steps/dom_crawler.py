@@ -18,12 +18,12 @@ from playwright.async_api import async_playwright
 from app.dom_schema import AgentBrowserSnapshot, DomSnapshot
 
 
-# ---------------------------------------------------------------------------
-# Auth-wall detection
-# ---------------------------------------------------------------------------
 
-# Check the FIRST PATH SEGMENT only — substring matching on the full URL causes
-# false positives (e.g. /authors, /authenticate, ?authToken=...).
+
+
+
+
+
 _AUTH_WALL_SEGMENTS = frozenset({"login", "signin", "auth", "unauthorized"})
 
 
@@ -44,9 +44,9 @@ def _is_auth_wall(url: str) -> bool:
     return segments[0] in _AUTH_WALL_SEGMENTS
 
 
-# ---------------------------------------------------------------------------
-# Route discovery (homepage link scan)
-# ---------------------------------------------------------------------------
+
+
+
 
 async def _discover_routes(page, staging_url: str) -> List[str]:
     """
@@ -68,7 +68,7 @@ async def _discover_routes(page, staging_url: str) -> List[str]:
 
         routes = list(
             {
-                # Strip query strings and fragments so /page?tab=x → /page
+
                 l.split("?")[0].split("#")[0]
                 for l in links
                 if l and l.startswith("/") and len(l) < 100
@@ -84,9 +84,9 @@ async def _discover_routes(page, staging_url: str) -> List[str]:
         return ["/"]
 
 
-# ---------------------------------------------------------------------------
-# Visit order builder
-# ---------------------------------------------------------------------------
+
+
+
 
 def _build_visit_order(
     seed_routes: List[str],
@@ -106,7 +106,7 @@ def _build_visit_order(
     filling seed slots cannot crowd it out.
     """
     home_in_seeds = "/" in seed_routes
-    # Reserve one slot for "/" unless it is already a seed.
+
     effective_max = max_routes if home_in_seeds else max(1, max_routes - 1)
 
     seen: set = set()
@@ -118,7 +118,7 @@ def _build_visit_order(
             seen.add(r)
             order.append(r)
             if len(order) >= effective_max:
-                break  # do NOT early-return; fall through to the "/" guarantee
+                break                                                          
 
     for r in sorted(discovered):
         if len(order) >= effective_max:
@@ -127,23 +127,23 @@ def _build_visit_order(
             seen.add(r)
             order.append(r)
 
-    # Guarantee the homepage is always crawled for global navigation context.
+
     if "/" not in seen:
         order.append("/")
 
     return order or ["/"]
 
 
-# ---------------------------------------------------------------------------
-# Per-page UI element extraction
-# ---------------------------------------------------------------------------
 
-# Per-route caps: buttons get a larger budget because they are the primary
-# grounding signal for click steps.  Links and inputs are less critical.
-MAX_ITEMS_BUTTONS = 40   # raised from 20 — JS eval now fetches 100
-MAX_ITEMS_LINKS   = 30   # raised from 20
+
+
+
+
+
+MAX_ITEMS_BUTTONS = 40                                             
+MAX_ITEMS_LINKS   = 30                   
 MAX_ITEMS_INPUTS  = 20
-MAX_ITEMS_TESTIDS = 40   # raised from 20 — JS eval now fetches 100
+MAX_ITEMS_TESTIDS = 40                                             
 
 
 def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
@@ -217,7 +217,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
             "text":     meta.get("text", ""),
             "testid":   meta.get("testid", ""),
             "aria":     meta.get("aria", ""),
-            "title":    "",  # dom_crawler JS eval does not collect title; extractor does
+            "title":    "",                                                              
             "id":       meta.get("id", ""),
             "role":     "button",
             "selector": _short_selector(meta, "button"),
@@ -282,9 +282,9 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
         return {"buttons": [], "links": [], "inputs": [], "data_testids": []}
 
 
-# ---------------------------------------------------------------------------
-# Snapshot merging
-# ---------------------------------------------------------------------------
+
+
+
 
 def _merge_snapshots(route_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -340,9 +340,9 @@ def _merge_snapshots(route_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, An
     }
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+
+
+
 
 async def crawl_dom_data(
     staging_url: str,
@@ -378,12 +378,12 @@ async def crawl_dom_data(
             context = await browser.new_context()
 
             try:
-                # Step 1: Discover homepage routes using a fresh page.
+
                 home_page = await context.new_page()
                 discovered_routes = await _discover_routes(home_page, staging_url)
                 await home_page.close()
 
-                # Step 2: Determine ordered visit list.
+
                 visit_order = _build_visit_order(
                     seed_routes=seed_routes or [],
                     discovered=discovered_routes,
@@ -397,7 +397,7 @@ async def crawl_dom_data(
                 base_url = staging_url.rstrip("/")
                 route_snapshots: Dict[str, Dict[str, Any]] = {}
 
-                # Step 3: Per-route collection — new page per route.
+
                 for route in visit_order:
                     full_url = base_url + route
                     page = await context.new_page()
@@ -410,7 +410,7 @@ async def crawl_dom_data(
                             wait_until="networkidle",
                         )
 
-                        # Auth-wall guard: discard routes that redirect to a login page.
+
                         if _is_auth_wall(page.url):
                             elapsed_ms = int((time.monotonic() - t0) * 1000)
                             print(
@@ -446,7 +446,7 @@ async def crawl_dom_data(
                 await context.close()
                 await browser.close()
 
-        # Step 4: Merge per-route snapshots into top-level union fields.
+
         merged = _merge_snapshots(route_snapshots)
         all_routes = sorted(set(discovered_routes) | set(seed_routes or []))
 
@@ -457,7 +457,7 @@ async def crawl_dom_data(
             "links":           merged["links"],
             "inputs":          merged["inputs"],
             "data_testids":    merged["data_testids"],
-            "route_snapshots": route_snapshots,  # extra key for future consumers
+            "route_snapshots": route_snapshots,                                  
         }
 
     except Exception as e:
@@ -473,9 +473,9 @@ async def crawl_dom_data(
         }
 
 
-# ---------------------------------------------------------------------------
-# Phase 4 — Agent Browser-backed targeted route crawl
-# ---------------------------------------------------------------------------
+
+
+
 
 def crawl_ab_routes(
     base_url: str,
@@ -507,8 +507,8 @@ def crawl_ab_routes(
         AgentBrowserSnapshot.  Routes that failed (CLI error, timeout) are
         omitted from the result — failures are logged but never raise.
     """
-    # Local import: keeps the synchronous Playwright crawl path independent
-    # of the browser sub-package at module load time.
+
+
     from app.browser.agent_browser_cli import AgentBrowserCLI, AgentBrowserError
 
     results: Dict[str, AgentBrowserSnapshot] = {}

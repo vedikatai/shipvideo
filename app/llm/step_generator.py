@@ -8,10 +8,10 @@ from typing import Any, Dict, List, Tuple, Optional
 from app.llm_guards import record_spend
 
 try:
-    from openai import OpenAI, BadRequestError  # type: ignore
+    from openai import OpenAI, BadRequestError                
 except Exception:
-    OpenAI = None  # type: ignore
-    BadRequestError = Exception  # type: ignore
+    OpenAI = None                
+    BadRequestError = Exception                
 
 
 def _get_client() -> Any:
@@ -125,8 +125,8 @@ def generate_next_steps(
         },
     }
 
-    # Build a compact, human-readable action menu from the live DOM so the model
-    # has a concrete list to pick from rather than guessing.
+
+
     available_buttons = [
         {"text": (b.get("text") or "").strip(), "testid": (b.get("testid") or "").strip(), "aria": (b.get("aria") or "").strip(), "id": (b.get("id") or "").strip()}
         for b in (dom_context.get("buttons") or [])
@@ -275,6 +275,6 @@ def find_ref_with_llm_sync(
             )
         ) or ""
     except RuntimeError:
-        # Fallback when called under an existing event loop.
+
         return ""
 

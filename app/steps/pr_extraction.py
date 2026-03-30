@@ -13,7 +13,7 @@ import requests
 
 from observability import pipeline_step
 
-# Truncate large patches so we don't send huge payloads to the LLM
+
 MAX_PATCH_CHARS = 3000
 TRUNCATION_SUFFIX = "\n... (truncated)"
 PER_PAGE = 100

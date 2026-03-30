@@ -89,10 +89,10 @@ def run_script_pipeline(
     previous_script: Optional[str] = None
     previous_error: Optional[str] = None
 
-    for attempt in range(1, MAX_SCRIPT_RETRIES + 2):  # +2 so last attempt is attempt N
+    for attempt in range(1, MAX_SCRIPT_RETRIES + 2):                                   
         _log("script_pipeline.attempt", {"attempt": attempt, "max": MAX_SCRIPT_RETRIES + 1})
 
-        # Generate (or repair) the script
+
         try:
             script = generate_playwright_script(
                 suggested_demo_flow=suggested_demo_flow,
@@ -107,7 +107,7 @@ def run_script_pipeline(
             _log("script_pipeline.generation_failed", {"attempt": attempt, "error": str(e)})
             raise ScriptPipelineError(f"Script generation failed: {e}") from e
 
-        # Execute the script with video recording
+
         result = run_script(
             script=script,
             base_url=preview_url,
@@ -118,7 +118,7 @@ def run_script_pipeline(
             webm_path = Path(result["webm_path"])
             _log("script_pipeline.execution_success", {"attempt": attempt, "webm": str(webm_path)})
 
-            # Convert webm → mp4
+
             mp4_path = convert_webm_to_mp4(webm_path, out_dir)
             _log("script_pipeline.video_ready", {"mp4": str(mp4_path)})
             return {
@@ -129,7 +129,7 @@ def run_script_pipeline(
                 "error": None,
             }
 
-        # Execution failed — prepare for retry if retries remain
+
         previous_error = result.get("error") or "execution_failed"
         previous_script = script
         _log(

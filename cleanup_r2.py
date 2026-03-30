@@ -27,18 +27,18 @@ def main():
         action="store_true",
         help="Only check usage, don't clean up"
     )
-    
+
     args = parser.parse_args()
-    
-    # Check current usage
+
+
     video_count, total_size_mb = check_storage_usage()
-    free_tier_mb = 10 * 1024  # 10 GB
-    
+    free_tier_mb = 10 * 1024         
+
     print(f"📊 Current Usage:")
     print(f"   Videos: {video_count}")
     print(f"   Storage: {total_size_mb:.1f}MB / {free_tier_mb}MB ({total_size_mb/free_tier_mb*100:.1f}%)")
     print()
-    
+
     if args.check_only:
         print("[cleanup] check-only mode no cleanup performed")
         return
@@ -47,10 +47,10 @@ def main():
     print(f"   Keeping: {args.max_videos} most recent videos")
     print(f"   Deleting: Videos older than {args.max_age_days} days")
     print()
-    
+
     cleanup_old_videos(max_videos=args.max_videos, max_age_days=args.max_age_days)
-    
-    # Check usage again
+
+
     new_count, new_size = check_storage_usage()
     print()
     print("[cleanup] after cleanup:")

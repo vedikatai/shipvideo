@@ -12,7 +12,7 @@ from observability.tracing import get_tracer, record_step_timing
 
 SLOW_STEP_MS = 5000
 
-# Simple ANSI colors for step logs:
+
 GREEN = "\033[32m"
 RED = "\033[31m"
 RESET = "\033[0m"

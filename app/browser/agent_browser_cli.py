@@ -54,7 +54,7 @@ from typing import Any, Dict, List, Optional
 from app.browser.agent_browser_types import CommandResult, SnapshotPayload
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot
 
-# Directory for raw snapshot JSON artifacts (created on first write).
+
 _SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "data" / "ab_snapshots"
 
 _INTERACTIVE_ROLES = frozenset({
@@ -188,9 +188,9 @@ class AgentBrowserCLI:
         self._session = session
         self._binary = binary
 
-    # ------------------------------------------------------------------
-    # Internal subprocess runner
-    # ------------------------------------------------------------------
+
+
+
 
     def _run(
         self,
@@ -264,9 +264,9 @@ class AgentBrowserCLI:
                         )
                     data = parsed.get("data") or {}
             except json.JSONDecodeError:
-                # Non-JSON stdout is acceptable for a small set of commands
-                # (e.g. plain-text snapshot output without --json). The caller
-                # can still read result["stdout"] directly in that case.
+
+
+
                 pass
 
         return CommandResult(
@@ -277,9 +277,9 @@ class AgentBrowserCLI:
             data=data,
         )
 
-    # ------------------------------------------------------------------
-    # Public command API
-    # ------------------------------------------------------------------
+
+
+
 
     def open(self, url: str) -> CommandResult:
         """
@@ -628,12 +628,12 @@ class AgentBrowserCLI:
         return ""
 
     def _extract_ref_from_find_output(self, result: CommandResult) -> str:
-        # Try structured payload first.
+
         data = result.get("data") or {}
         maybe = self._find_ref_in_obj(data)
         if maybe:
             return maybe
-        # Fallback to stdout parsing.
+
         out = str(result.get("stdout") or "")
         m = re.search(r"@e\d+", out)
         if m:
@@ -741,9 +741,9 @@ class AgentBrowserCLI:
         """Instance wrapper for snapshot diffing used by step runner."""
         return compare_snapshots(before, after)
 
-    # ------------------------------------------------------------------
-    # Snapshot persistence
-    # ------------------------------------------------------------------
+
+
+
 
     def _save_raw_snapshot(self, result: CommandResult) -> str:
         """
@@ -778,9 +778,9 @@ class AgentBrowserCLI:
             )
             return ""
 
-    # ------------------------------------------------------------------
-    # Snapshot normalization
-    # ------------------------------------------------------------------
+
+
+
 
     def _normalize_snapshot(
         self,
@@ -866,9 +866,9 @@ class AgentBrowserCLI:
         )
 
 
-# ---------------------------------------------------------------------------
-# Manual smoke-test harness (run with: python -m app.browser.agent_browser_cli)
-# ---------------------------------------------------------------------------
+
+
+
 
 if __name__ == "__main__":
     import sys

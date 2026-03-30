@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.sync_api import Page
 
-# Playwright built-in selector engine prefixes — always valid to pass to Playwright.
-# e.g.  "role=button name=Submit"  "text=Click Me"  "css=#id"  "xpath=//button"
+
+
 _PLAYWRIGHT_ENGINE_RE = re.compile(
     r"^(role|text|css|xpath|id|data-testid|aria-label|nth|has-text|has)\s*=",
     re.IGNORECASE,
@@ -41,23 +41,23 @@ def _allowed_raw_css(selector: str, dom_ctx: Dict[str, Any]) -> bool:
     if not s:
         return False
 
-    # Semantic attribute selectors — always safe
+
     if s.startswith("[data-testid=") or s.startswith("[aria-label="):
         return True
 
-    # Playwright selector engine prefixes — valid Playwright syntax, allow
+
     if _PLAYWRIGHT_ENGINE_RE.match(s):
         return True
 
-    # Raw #id — allowed only when that id is found in the live DOM buttons/links
+
     if s.startswith("#"):
-        raw_id = s[1:].split("[")[0].split(":")[0]  # strip any pseudo/attr suffix
+        raw_id = s[1:].split("[")[0].split(":")[0]                                
         for b in (dom_ctx.get("buttons") or []) + (dom_ctx.get("links") or []):
             if (b.get("id") or "").strip() == raw_id:
                 return True
         return False
 
-    # .class and complex compound selectors are too brittle — reject
+
     return False
 
 
@@ -117,7 +117,7 @@ def validate_step_against_dom(
             return False, "missing_click_target"
 
         if selector:
-            # Stage 1: static / syntax gate (same semantics as before Phase 4)
+
             is_testid = selector.startswith("[data-testid=")
             is_aria = selector.startswith("[aria-label=")
             is_playwright_engine = bool(_PLAYWRIGHT_ENGINE_RE.match(selector))
@@ -125,7 +125,7 @@ def validate_step_against_dom(
             if not (is_testid or is_aria or is_playwright_engine or _allowed_raw_css(selector, dom_ctx)):
                 return False, f"raw_css_rejected:{selector}"
 
-            # Stage 2: live existence check — authoritative gate when page available
+
             if page is not None:
                 if _selector_count_on_page(page, selector) == 0:
                     return False, f"selector_not_found_on_page:{selector}"
@@ -138,12 +138,12 @@ def validate_step_against_dom(
                 return True, "ok:playwright_engine"
             return True, "ok:raw_css_present_in_dom"
 
-        # label-based click: static pre-filter, then live count as authoritative gate
+
         if label:
             known = _known_button_texts(dom_ctx)
 
             if page is not None:
-                # Live count is the authoritative gate
+
                 try:
                     live_count = page.get_by_text(label, exact=True).count()
                 except Exception:
@@ -152,7 +152,7 @@ def validate_step_against_dom(
                     return False, f"label_not_found_on_page:{label}"
                 return True, "ok:label_live"
 
-            # Static fallback when no page is available
+
             if label in known:
                 return True, "ok:label_exact"
             label_lower = label.lower()

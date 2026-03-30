@@ -227,7 +227,7 @@ def run_pipeline(
         metrics_path = write_run_metrics(run_metrics)
         print(f"[steps.pipeline] run_metrics file={metrics_path.name}", flush=True)
 
-    # ── Script-first (opt-in only) ───────────────────────────────────────────
+
     has_demo_flow = bool(
         generation_context
         and (generation_context.get("suggested_demo_flow") or "").strip()
@@ -247,7 +247,7 @@ def run_pipeline(
             capture_summary = {
                 "pipeline": "script",
                 "pipeline_branch": "script_first",
-                # Script-first uses Playwright via app.recorder.playwright_runner (not stepwise / not Agent Browser).
+
                 "capture_browser": "playwright",
                 "capture_path": "script_first_playwright",
                 "agent_browser_used": False,
@@ -285,7 +285,7 @@ def run_pipeline(
             flush=True,
         )
 
-    # ── Stepwise fallback ────────────────────────────────────────────────────
+
     if video_path is None:
         print("[steps.pipeline] running stepwise pipeline", flush=True)
         try:
@@ -316,7 +316,7 @@ def run_pipeline(
             capture_summary["pipeline"] = "stepwise"
             capture_summary["pipeline_branch"] = "stepwise"
             capture_summary["capture_path"] = "stepwise"
-            # run_capture already sets backend, mode, debug.engine, etc.
+
             capture_summary["capture_browser"] = capture_summary.get("backend") or "playwright"
             capture_summary["agent_browser_used"] = (
                 capture_summary.get("backend") == "agent_browser_cli"
@@ -341,7 +341,7 @@ def run_pipeline(
             _finalize_run_metrics(success=False, error=e)
             raise
 
-    # ── Final validation + upload ────────────────────────────────────────────
+
     if not video_path or not video_path.exists():
         err = FileNotFoundError(f"Video file not found after {pipeline_used} pipeline: {video_path}")
         _finalize_run_metrics(success=False, error=err)

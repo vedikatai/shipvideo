@@ -38,15 +38,15 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
 
 MAX_STEP_RETRIES = 3
 
-# ---------------------------------------------------------------------------
-# Phase 3 — Backend switch
-# ---------------------------------------------------------------------------
 
-#: Valid values for BROWSER_BACKEND.
+
+
+
+
 BrowserBackend = Literal["playwright", "agent_browser_cli"]
 
-#: Active backend for this process. Defaults to Agent Browser CLI; set
-#: BROWSER_BACKEND=playwright to use Playwright stepwise instead.
+
+
 def _resolve_browser_backend() -> BrowserBackend:
     raw = os.getenv("BROWSER_BACKEND", "").strip().lower()
     if raw == "playwright":
@@ -56,11 +56,11 @@ def _resolve_browser_backend() -> BrowserBackend:
 
 BROWSER_BACKEND: BrowserBackend = _resolve_browser_backend()
 
-#: Experiment mode used when BROWSER_BACKEND=agent_browser_cli.
-#: Reads EXPERIMENT_MODE env var; defaults to "deterministic" (Mode A).
+
+
 _EXPERIMENT_MODE: str = os.getenv("EXPERIMENT_MODE", "deterministic").strip() or "deterministic"
 
-#: Declared default for telemetry / UI (Agent Browser is the default capture path).
+
 _DEFAULT_BACKEND: BrowserBackend = "agent_browser_cli"
 
 
@@ -226,9 +226,9 @@ def run_capture(
         _EXPERIMENT_MODE if BROWSER_BACKEND == "agent_browser_cli" else "playwright"
     )
 
-    # ------------------------------------------------------------------
-    # Phase 3 / Phase 4 — Agent Browser experiment path
-    # ------------------------------------------------------------------
+
+
+
     if BROWSER_BACKEND == "agent_browser_cli":
         _objective = {
             "goal": "Recover missing prerequisite interactions from current DOM",
@@ -260,9 +260,9 @@ def run_capture(
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
 
-    # ------------------------------------------------------------------
-    # Default — existing Playwright stepwise path (unchanged)
-    # ------------------------------------------------------------------
+
+
+
     else:
         _objective = {
             "goal": "Generate reliable demo actions from current DOM only",
@@ -294,9 +294,9 @@ def run_capture(
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
 
-    # ------------------------------------------------------------------
-    # Phase 4 — Experiment metadata (appended to all return paths)
-    # ------------------------------------------------------------------
+
+
+
     _result["backend"] = BROWSER_BACKEND
     _result["mode"] = _active_mode
     _result["test_case_id"] = test_case_id
@@ -309,7 +309,7 @@ def run_capture(
     _result["promotion_allowed"] = False
     _result["default_backend"] = _DEFAULT_BACKEND
 
-    # Persist experiment artifacts when a test_case_id is provided.
+
     if test_case_id:
         from app.browser.experiment_logger import ExperimentLogger, summarize_artifacts
         _logger = ExperimentLogger(

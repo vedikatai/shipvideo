@@ -4,7 +4,7 @@ import os
 def comment_on_pr(repo_full_name: str, pr_number: int, video_url: str = None, error_message: str = None, extra_note: str = None):
     """
     Posts a comment on a PR with the video URL or error message.
-    
+
     Args:
         repo_full_name: Full name of the repository (e.g., "owner/repo")
         pr_number: PR number
