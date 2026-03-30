@@ -16,13 +16,6 @@ def regenerate_with_feedback(
     max_attempts: int = 3,
     page: Optional[Page] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Retry loop with strict selector validation on regenerated steps.
-
-    When ``page`` is provided, each regenerated step is validated against the
-    live page (existence check) in addition to the static DOM-context check.
-    Defaults to ``None`` so callers without a live page are unaffected.
-    """
     attempts: List[Dict[str, Any]] = []
     previous_error = error_context
 

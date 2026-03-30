@@ -19,19 +19,10 @@ _PASSTHROUGH_FIELDS = (
 
 
 def _normalize_selector_quotes(selector: str) -> str:
-    """Normalize attribute selector to single-quote form for consistent set membership.
-
-    The crawler generates selectors with single quotes: [data-testid='x'].
-    The LLM may output double quotes: [data-testid="x"].
-    Without normalization, validate_against_dom rejects perfectly valid steps.
-    """
     return re.sub(r'\[(\w[\w-]*)\s*=\s*"([^"]+)"\]', r"[\1='\2']", selector)
 
 
 def validate_steps(steps: Any) -> List[Dict[str, Any]]:
-    """
-    Keep only steps with a known action to avoid executor crashes.
-    """
     if not isinstance(steps, list):
         return []
 
@@ -46,14 +37,6 @@ def validate_steps(steps: Any) -> List[Dict[str, Any]]:
 
 
 def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Normalize heterogeneous LLM step shapes into the minimal executor format.
-
-    CHANGED: Fixed bug where _PASSTHROUGH_FIELDS were written to undefined
-    `normalized_step` variable instead of `base`. Every click step was
-    silently losing validation metadata. Now correctly preserved on `base`
-    before append.
-    """
     normalized: List[Dict[str, Any]] = []
 
     for step in steps:
@@ -130,12 +113,6 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
-    """
-    Derive likely URL routes from changed file paths.
-
-    This is a best-effort heuristic so "new routes" added by the PR are not
-    rejected just because the homepage crawl didn't include them.
-    """
     routes: Set[str] = set()
     for f in diff_files:
         path = f.get("path", "")
@@ -167,15 +144,6 @@ def validate_against_dom(
     allowed_routes_override: Optional[Set[str]] = None,
     contract: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Reconcile steps against the live DOM snapshot.
-
-    Rules:
-    - NEVER drop click steps due to DOM mismatch
-    - Annotate with dom_confirmed + match_confidence instead
-    - Trust contract labels for conditional UI (seed into valid_texts)
-    - Only drop invalid goto routes
-    """
 
 
 

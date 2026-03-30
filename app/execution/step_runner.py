@@ -54,17 +54,6 @@ def _build_metrics(
     total_initial_steps: int,
     total_retries: int,
 ) -> Dict[str, Any]:
-    """
-    Compute Phase 4 comparison metrics from a runner's per-step results list.
-
-    Produces a metrics dict with the same keys for both run_stepwise and
-    run_ab_stepwise so ExperimentLogger can consume them uniformly.
-
-    Args:
-        results             — list of per-step result dicts from the runner.
-        total_initial_steps — denominator for success_rate.
-        total_retries       — total retry/regeneration count for the run.
-    """
     succeeded = sum(1 for r in results if r.get("status") == "ok")
     wrong_click_count = sum(
         1 for r in results if r.get("outcome") == "wrong_click"
@@ -96,16 +85,6 @@ def _build_metrics(
 
 
 def _classify_final_outcome(*, success: bool, failure_reason: str = "") -> str:
-    """
-    Convert runner success/failure state into the Phase 5 machine-readable
-    decision categories used by experiment reporting.
-
-    Categories:
-        passed       — run completed successfully.
-        ambiguous    — target ambiguity blocked a safe action.
-        regressed    — concrete target/execution failure occurred.
-        inconclusive — outcome does not clearly fit the above categories.
-    """
     if success:
         return "passed"
 
@@ -139,7 +118,6 @@ def _resolve_url(base: str, path: str) -> str:
 
 
 def _normalize_validation_condition(raw: Any) -> Optional[ValidationCondition]:
-    """Return a validated ValidationCondition dict, or None when invalid/missing."""
     if not isinstance(raw, dict):
         return None
     cond_type = str(raw.get("type") or "").strip()
@@ -152,14 +130,12 @@ def _normalize_validation_condition(raw: Any) -> Optional[ValidationCondition]:
 
 
 def _extract_validation_condition(step: Dict[str, Any]) -> Optional[ValidationCondition]:
-    """Read structured click validation metadata from a step dict."""
     return _normalize_validation_condition(
         step.get("success_condition") or step.get("validation_condition")
     )
 
 
 def _configure_ab_session(cli: Any, capture_settings: CaptureSettings) -> Dict[str, Any]:
-    """Apply deterministic Agent Browser session settings before capturing UI."""
     cli.set_viewport(
         capture_settings.viewport_width,
         capture_settings.viewport_height,
@@ -175,13 +151,6 @@ def _settle_ab_page(
     *,
     validation_condition: Optional[ValidationCondition] = None,
 ) -> ABPageSettleResult:
-    """
-    Prefer deterministic page readiness checks over blind sleeps.
-
-    `networkidle` is the preferred gate. `domcontentloaded` and validation waits
-    are best-effort fallback signals because modern apps may keep background
-    activity alive. This function never raises.
-    """
     settle: ABPageSettleResult = {
         "domcontentloaded": False,
         "networkidle": False,
@@ -300,10 +269,6 @@ def _resolve_ab_click_target(
     allow_scroll_retry: bool,
     selector: str = "",
 ) -> ABTargetResolution:
-    """
-    Resolve a click target using command-first lookup with deterministic
-    snapshot selection as a supporting path.
-    """
     from app.browser.ref_selector import select_ref
 
     resolved: ABTargetResolution = {
@@ -375,10 +340,6 @@ def _resolve_ab_click_target(
 
 
 def _ensure_ab_target_actionable(cli: Any, click_target: str) -> ABActionabilityResult:
-    """
-    Bring the target into view, then verify it is both visible and enabled
-    before clicking.
-    """
     try:
         cli.scroll_into_view(click_target)
     except Exception:
@@ -785,7 +746,6 @@ def _matches_validation_condition(
     snapshot_text: str,
     element_names: List[str],
 ) -> bool:
-    """Evaluate one explicit success condition against one page state."""
     expected = condition["value"]
     cond_type = condition["type"]
     if cond_type == "url_match":
@@ -836,7 +796,6 @@ def _evaluate_click_validation(
     snap_before: Dict[str, Any],
     snap_after: Dict[str, Any],
 ) -> StepValidationResult:
-    """Validate the post-click page state for one click step."""
     condition = _extract_validation_condition(step)
     if condition is None:
         return StepValidationResult(
@@ -871,11 +830,6 @@ def _evaluate_click_validation(
 
 
 def _is_stale_ref_error(error_message: str, click_target: str) -> bool:
-    """
-    Best-effort stale-ref classification for Agent Browser click failures.
-
-    Only ref-based clicks (@e1 style) can become stale in the snapshot sense.
-    """
     if not click_target.startswith("@"):
         return False
     lowered = error_message.lower()
@@ -1077,16 +1031,6 @@ def run_stepwise(
     max_retries_per_failure: int = 3,
     capture_settings: Optional[CaptureSettings] = None,
 ) -> Dict[str, Any]:
-    """
-    Step-by-step execution model:
-      execute step -> detect navigation/major change -> re-anchor -> regenerate next steps from fresh DOM.
-
-    Phase 4 additions (backward-compatible):
-        - step_latency_ms  added to every step result entry.
-        - total_retries    accumulated across all regenerate_with_feedback calls.
-        - metrics          dict appended to all return paths for ExperimentLogger.
-        - steps_succeeded / steps_failed added to failure return paths.
-    """
     cs = capture_settings or CaptureSettings()
 
     for old in screenshot_dir.glob("shot*.png"):
@@ -1212,18 +1156,6 @@ def _detect_state_change(
     snap_text_before: str,
     snap_text_after: str,
 ) -> bool:
-    """
-    Return True when a meaningful page state change is detected after a click.
-
-    Two signals:
-        1. URL changed  — navigated to a different page.
-        2. Snapshot diff — accessibility tree text changed, indicating DOM
-                           updates (modal opened, form submitted, content
-                           replaced, etc.).
-
-    Both signals use the normalised AgentBrowserSnapshot fields so the check
-    is self-consistent with the data the ref-selector already consumed.
-    """
     if url_before != url_after:
         return True
     if snap_text_before != snap_text_after:
@@ -1243,61 +1175,6 @@ def run_ab_stepwise(
     capture_settings: Optional[CaptureSettings] = None,
     session: str = "ab_exp",
 ) -> Dict[str, Any]:
-    """
-    Agent Browser CLI execution loop — experimental side-path parallel to run_stepwise.
-
-    Implements the Phase 3 execution loop exactly as specified:
-        open preview URL
-        → for each step (up to max_steps_per_run):
-            goto   — cli.open(full_url)
-            screenshot — cli.screenshot(path)
-            click:
-                snapshot → select_ref → before-screenshot
-                → click(ref) → settle via browser load checks
-                → after-screenshot → re-snapshot → state-change check
-                → retry up to max_retries_per_step on stale-ref / wrong-click
-
-    Loop controls (hard, non-negotiable):
-        max_steps_per_run   = 10  — prevents runaway loops.
-        max_retries_per_step = 2  — stale-ref recovery + wrong-click retry.
-
-    Fatal outcomes (loop stops immediately):
-        no_match        — no ref found for intent at any waterfall level.
-        ambiguous       — multiple refs matched; cannot safely select.
-        repeated_action — same ref chosen on same URL without state change.
-        click_failed    — CLI click command raised AgentBrowserError after
-                          all retries (may be a persistent stale ref).
-        snapshot_failed — cannot read current page state.
-        no_intent       — step has no text and no parseable selector.
-
-    Validation outcomes:
-        success         — explicit post-click validation passed.
-        wrong_click     — click ran without error, but the explicit post-click
-                          validation condition was not satisfied after retries.
-                          This is a step failure.
-
-    Return shape is identical to run_stepwise so step_execution.py can
-    process both paths with the same logic.
-
-    NOTE: The existing Playwright run_stepwise path is completely unchanged.
-    This function is an additive side-path only.
-
-    Args:
-        preview_url        — base URL of the preview deployment.
-        initial_steps      — step list from the planner (same format as
-                             run_stepwise). Processed in order up to
-                             max_steps_per_run.
-        screenshot_dir     — directory for shot*.png files.
-        objective          — bounded runtime recovery context for conditional UI.
-        max_steps_per_run  — hard upper bound on steps processed.
-        max_retries_per_step — retry attempts per click step.
-        mode               — ExperimentMode: "deterministic" (Mode A, default)
-                             or "deterministic_plus_llm" (Mode B).
-        capture_settings   — CaptureSettings for viewport etc.; uses defaults
-                             when not provided.
-        session            — agent-browser session name; use a unique value
-                             per concurrent job for isolation.
-    """
 
 
     from app.browser.agent_browser_cli import AgentBrowserCLI, AgentBrowserError

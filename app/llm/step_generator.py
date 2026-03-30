@@ -32,11 +32,6 @@ def _call_with_fallback(
     max_completion_tokens: int,
     schema: Dict[str, Any],
 ) -> Tuple[Any, Dict[str, Any]]:
-    """
-    Call the Azure OpenAI deployment with json_schema mode; fall back to json_object
-    if the deployment does not support json_schema (older Azure versions raise BadRequestError).
-    Returns (completion, parsed_data).
-    """
     try:
         completion = client.chat.completions.create(
             model=deployment,
@@ -86,11 +81,6 @@ def generate_next_steps(
     previous_error: Dict[str, Any] | None = None,
     max_steps: int = 2,
 ) -> List[Dict[str, Any]]:
-    """
-    Generate only NEXT step(s) from current DOM (re-anchored model).
-    Strict contract:
-      {"steps":[{"action":"click|goto|screenshot","selector":"","text":"","url":"","label":"","reasoning":""}]}
-    """
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment:
         raise RuntimeError("AZURE_OPENAI_DEPLOYMENT must be set")
@@ -212,13 +202,6 @@ async def find_ref_with_llm(
     interactive_elements: List[Dict[str, Any]],
     context_elements: List[Dict[str, Any]] | None = None,
 ) -> Optional[str]:
-    """
-    Mode B helper: recover a ref when deterministic ref selection returns no_match.
-
-    Returns:
-        A valid ref (e.g. "@e12") from the provided interactive elements, or ""
-        when no safe recovery is possible.
-    """
     if not intent or not interactive_elements:
         return None
 

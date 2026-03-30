@@ -14,7 +14,6 @@ FFMPEG_LOGLEVEL = "-loglevel", "error"
 
 @pipeline_step("render")
 def render_video():
-    """Create a video from screenshots. Dynamically finds all shot*.png files in order."""
     output_path = SCREENSHOT_DIR / "out.mp4"
 
     cs = load_capture_settings()

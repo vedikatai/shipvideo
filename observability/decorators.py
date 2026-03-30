@@ -1,7 +1,3 @@
-"""
-Pipeline step decorator: creates a span, prints readable step logs, measures duration, sets error status on failure.
-Business logic must not import OpenTelemetry directly; use @pipeline_step from this module.
-"""
 import asyncio
 import functools
 import time
@@ -27,14 +23,6 @@ def _format_duration_ms(ms: float) -> str:
 
 
 def pipeline_step(step_name: str):
-    """
-    Decorator that starts an OpenTelemetry span and prints human-readable step logs.
-    - On start: ▶ step_name
-    - On success: ✓ step_name (duration); if duration > 5000 ms also prints ⚠ SLOW STEP
-    - On error: ✗ step_name FAILED (still records exception in span)
-    - Records duration_ms on the span and in pipeline summary.
-    Supports both sync and async functions.
-    """
 
     def decorator(fn):
         if asyncio.iscoroutinefunction(fn):

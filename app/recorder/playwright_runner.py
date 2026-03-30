@@ -1,18 +1,3 @@
-"""
-Playwright runner: executes a generated `run_demo(page, context)` function
-with continuous video recording enabled at the browser context level.
-
-Video quality:
-- Playwright's built-in record_video_dir produces smooth, continuous .webm
-  (real screen recording, not stitched screenshots).
-- A cursor + click-ripple overlay is injected via add_init_script for visual
-  clarity in the recorded output.
-
-Contract for the generated script:
-- Must define `def run_demo(page, context):`
-- `base_url` and `output_dir` are injected as module-level variables.
-- Must NOT call sync_playwright(), browser.launch(), or close anything.
-"""
 from __future__ import annotations
 
 import json
@@ -79,23 +64,6 @@ def run_script(
     output_dir: Path,
     timeout_seconds: int = 120,
 ) -> Dict[str, Any]:
-    """
-    Execute the generated `run_demo(page, context)` function with video recording.
-
-    Steps:
-    1. Compile and exec the script to extract `run_demo`.
-    2. Launch Chromium with record_video_dir enabled.
-    3. Inject cursor/ripple overlay via add_init_script.
-    4. Navigate to base_url, then call run_demo(page, context).
-    5. Close context to flush the video.
-
-    Returns:
-        dict: {
-            "success": bool,
-            "webm_path": str | None,   # path to the recorded .webm
-            "error": str | None,
-        }
-    """
     output_dir.mkdir(parents=True, exist_ok=True)
     video_dir = output_dir / "video_tmp"
     video_dir.mkdir(parents=True, exist_ok=True)

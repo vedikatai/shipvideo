@@ -1,47 +1,3 @@
-"""
-Agent Browser CLI wrapper — Phase 1 / Phase 3.
-
-Provides a thin Python subprocess adapter for the stock `agent-browser` binary
-(https://github.com/vercel-labs/agent-browser). All interactions with the
-agent-browser daemon go through this module.
-
-Public API:
-    AgentBrowserCLI.open(url)               — navigate to URL
-    AgentBrowserCLI.set_viewport(...)       — set deterministic viewport size
-    AgentBrowserCLI.snapshot(...)           — take accessibility snapshot,
-                                              normalize to AgentBrowserSnapshot
-    AgentBrowserCLI.click(ref)              — click element by ref (@e1, @e2, …)
-    AgentBrowserCLI.wait(ms)                — wait for a fixed number of ms
-    AgentBrowserCLI.wait_for_load_state(...) — wait for page load state
-    AgentBrowserCLI.wait_for_text(...)      — wait for text to appear
-    AgentBrowserCLI.wait_for_url(...)       — wait for URL pattern
-    AgentBrowserCLI.scroll_into_view(...)   — move a target into view
-    AgentBrowserCLI.is_visible(...)         — check whether a target is visible
-    AgentBrowserCLI.is_enabled(...)         — check whether a target is enabled
-    AgentBrowserCLI.console_messages()      — read browser console entries
-    AgentBrowserCLI.page_errors()           — read page errors/exceptions
-    AgentBrowserCLI.network_requests()      — read network request history
-    AgentBrowserCLI.screenshot(path)        — save a screenshot to disk
-    AgentBrowserCLI.close()                 — close the browser session
-    AgentBrowserCLI.get_url()               — return the current page URL
-    AgentBrowserCLI.get_text(ref_or_sel)    — return visible text of an element
-                                              (Phase 3: post-click text validation)
-
-Execution model:
-    agent-browser uses a client-daemon architecture. The daemon starts
-    automatically on the first command and persists between commands within
-    the same session. Session isolation is controlled via --session <name>.
-
-Error model:
-    Any non-zero exit code, subprocess timeout, or JSON success=False raises
-    AgentBrowserError. The exception carries the full command list, stderr
-    output, and exit code so failures can be debugged without guessing.
-
-Raw snapshot persistence:
-    Every snapshot call saves the raw CLI JSON payload to
-    app/data/ab_snapshots/ by default. These files are the primary debugging
-    artifact for the accuracy experiment. Disable with save_raw=False.
-"""
 from __future__ import annotations
 
 import json
@@ -85,20 +41,6 @@ def compare_snapshots(
     before: AgentBrowserSnapshot,
     after: AgentBrowserSnapshot,
 ) -> Dict[str, Any]:
-    """
-    Compute a human-friendly UI diff from two snapshots.
-
-    Returns a compact dict suitable for narration:
-      {
-        "url_changed": bool,
-        "from_url": str,
-        "to_url": str,
-        "added_elements": [str],
-        "removed_elements": [str],
-        "changed": bool,
-        "summary": str
-      }
-    """
     before_names = _snapshot_name_set(before)
     after_names = _snapshot_name_set(after)
     added = sorted(after_names - before_names)[:12]
@@ -130,15 +72,6 @@ def compare_snapshots(
 
 
 class AgentBrowserError(RuntimeError):
-    """
-    Raised when an agent-browser CLI command fails.
-
-    Attributes:
-        command    — the exact argv list that was executed.
-        stderr     — captured stderr from the process.
-        exit_code  — process exit code (-1 for binary-not-found,
-                     -2 for timeout, otherwise the real exit code).
-    """
 
     def __init__(
         self,
@@ -164,20 +97,6 @@ class AgentBrowserError(RuntimeError):
 
 
 class AgentBrowserCLI:
-    """
-    Thin Python wrapper around the stock `agent-browser` CLI binary.
-
-    Each instance corresponds to one named session. Multiple commands issued
-    through the same instance share browser state via the agent-browser
-    daemon. Use distinct session names for parallel or isolated runs.
-
-    Args:
-        session — agent-browser session name (--session flag). Defaults to
-                  "default". Use a unique value per concurrent job to ensure
-                  browser state isolation.
-        binary  — path to the agent-browser executable. Defaults to
-                  "agent-browser" (expects it to be on $PATH).
-    """
 
     def __init__(
         self,
@@ -198,22 +117,6 @@ class AgentBrowserCLI:
         json_output: bool = True,
         timeout: int = 60,
     ) -> CommandResult:
-        """
-        Execute one agent-browser command via subprocess.
-
-        Global flags prepended in order:
-            --session <name>   — isolates daemon state per session.
-            --json             — requests structured JSON output (when
-                                 json_output=True).
-
-        Raises AgentBrowserError on:
-            - binary not found (FileNotFoundError → exit_code=-1)
-            - subprocess timeout (exit_code=-2)
-            - non-zero process exit code
-            - JSON envelope with success=False
-
-        Returns CommandResult with parsed data on success.
-        """
         cmd: List[str] = [self._binary, "--session", self._session]
         if json_output:
             cmd.append("--json")
@@ -282,21 +185,10 @@ class AgentBrowserCLI:
 
 
     def open(self, url: str) -> CommandResult:
-        """
-        Navigate to url. Starts the agent-browser daemon automatically if it
-        is not already running.
-
-        Corresponds to: agent-browser open <url>
-        """
         print(f"[agent_browser] open url={url!r}", flush=True)
         return self._run("open", url)
 
     def set_viewport(self, width: int, height: int) -> CommandResult:
-        """
-        Set the browser viewport to a deterministic size for the session.
-
-        Corresponds to: agent-browser set viewport <width> <height>
-        """
         width_px = int(width)
         height_px = int(height)
         print(
@@ -313,29 +205,6 @@ class AgentBrowserCLI:
         compact: bool = True,
         save_raw: bool = True,
     ) -> AgentBrowserSnapshot:
-        """
-        Take an accessibility snapshot of the current page and return a
-        normalized AgentBrowserSnapshot.
-
-        CLI flag mapping:
-            interactive=True  → -i  (interactive elements only: buttons,
-                                      links, inputs)
-            cursor=True       → -C  (also include cursor-interactive elements
-                                      such as divs with onclick/tabindex; needed
-                                      for modern web apps that use non-semantic
-                                      clickable elements)
-            compact=True      → -c  (remove empty structural elements to reduce
-                                      snapshot size)
-
-        Args:
-            save_raw — when True, persist the raw CLI JSON payload to
-                       app/data/ab_snapshots/ for experiment debugging.
-                       Set to False only in performance-sensitive hot paths.
-
-        Returns:
-            AgentBrowserSnapshot with current_url, snapshot_text,
-            interactive_elements, context_elements, and raw_snapshot_path.
-        """
         args = ["snapshot"]
         if interactive:
             args.append("-i")
@@ -359,36 +228,13 @@ class AgentBrowserCLI:
         )
 
     def click(self, ref: str) -> CommandResult:
-        """
-        Click the element identified by ref (e.g. "@e1").
-
-        Refs are stable within a snapshot session but become stale after
-        navigation or significant DOM changes. Always re-snapshot after a
-        click that causes page state to change.
-
-        Corresponds to: agent-browser click <ref>
-        """
         print(f"[agent_browser] click ref={ref!r}", flush=True)
         return self._run("click", ref)
 
     def wait(self, ms: int) -> CommandResult:
-        """
-        Wait for a fixed number of milliseconds.
-
-        Use after a click to allow the page to settle before taking a
-        follow-up snapshot. The plan mandates a minimum 1000–2000 ms
-        floor after any click that may trigger navigation or animation.
-
-        Corresponds to: agent-browser wait <ms>
-        """
         return self._run("wait", str(ms))
 
     def wait_for_load_state(self, state: str, *, timeout: int = 15) -> CommandResult:
-        """
-        Wait until the page reaches a load state.
-
-        Corresponds to: agent-browser wait --load <state>
-        """
         state_norm = (state or "").strip().lower()
         if state_norm not in {"domcontentloaded", "networkidle"}:
             raise ValueError(f"unsupported load state: {state!r}")
@@ -396,11 +242,6 @@ class AgentBrowserCLI:
         return self._run("wait", "--load", state_norm, timeout=timeout)
 
     def wait_for_text(self, text: str, *, timeout: int = 10) -> CommandResult:
-        """
-        Wait until the given text is visible on the page.
-
-        Corresponds to: agent-browser wait --text <text>
-        """
         expected = (text or "").strip()
         if not expected:
             raise ValueError("text cannot be empty")
@@ -408,11 +249,6 @@ class AgentBrowserCLI:
         return self._run("wait", "--text", expected, timeout=timeout)
 
     def wait_for_url(self, pattern: str, *, timeout: int = 10) -> CommandResult:
-        """
-        Wait until the current URL matches the provided pattern.
-
-        Corresponds to: agent-browser wait --url <pattern>
-        """
         expected = (pattern or "").strip()
         if not expected:
             raise ValueError("pattern cannot be empty")
@@ -420,11 +256,6 @@ class AgentBrowserCLI:
         return self._run("wait", "--url", expected, timeout=timeout)
 
     def scroll_into_view(self, ref_or_selector: str) -> CommandResult:
-        """
-        Scroll the target into the viewport before interaction.
-
-        Corresponds to: agent-browser scrollintoview <ref_or_selector>
-        """
         target = (ref_or_selector or "").strip()
         if not target:
             raise ValueError("ref_or_selector cannot be empty")
@@ -432,18 +263,12 @@ class AgentBrowserCLI:
         return self._run("scrollintoview", target)
 
     def scroll(self, direction: str = "down", px: int = 700) -> CommandResult:
-        """
-        Scroll page viewport to surface off-screen targets.
-
-        Corresponds to: agent-browser scroll <direction> <px>
-        """
         dir_norm = (direction or "down").strip().lower() or "down"
         dist = int(px)
         print(f"[agent_browser] scroll direction={dir_norm!r} px={dist}", flush=True)
         return self._run("scroll", dir_norm, str(dist))
 
     def is_visible(self, ref_or_selector: str) -> bool:
-        """Return True when the target is currently visible."""
         try:
             result = self._run("is", "visible", ref_or_selector)
             return self._coerce_bool(result, primary_keys=("visible", "isVisible"))
@@ -451,7 +276,6 @@ class AgentBrowserCLI:
             return False
 
     def is_enabled(self, ref_or_selector: str) -> bool:
-        """Return True when the target is currently enabled."""
         try:
             result = self._run("is", "enabled", ref_or_selector)
             return self._coerce_bool(result, primary_keys=("enabled", "isEnabled"))
@@ -480,39 +304,16 @@ class AgentBrowserCLI:
             return []
 
     def screenshot(self, path: str | Path) -> CommandResult:
-        """
-        Save a screenshot of the current page to path.
-
-        The parent directory of path must exist before calling this method.
-        Corresponds to: agent-browser screenshot <path>
-
-        json_output is disabled because the screenshot command writes a binary
-        file to disk; structured JSON output is not required.
-        """
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         print(f"[agent_browser] screenshot path={target}", flush=True)
         return self._run("screenshot", str(target), json_output=False)
 
     def close(self) -> CommandResult:
-        """
-        Close the current browser session.
-
-        Corresponds to: agent-browser close
-        """
         print(f"[agent_browser] close session={self._session!r}", flush=True)
         return self._run("close", json_output=False)
 
     def get_url(self) -> str:
-        """
-        Return the current page URL.
-
-        Used internally by snapshot() to annotate normalized elements with
-        the URL at which they were observed.
-
-        Corresponds to: agent-browser get url
-        Returns empty string on any failure (e.g. browser not open yet).
-        """
         try:
             result = self._run("get", "url")
             return str(result["data"].get("url") or "")
@@ -520,18 +321,6 @@ class AgentBrowserCLI:
             return ""
 
     def get_text(self, ref_or_selector: str) -> str:
-        """
-        Return the visible text content of an element by ref (@e1) or CSS selector.
-
-        Useful for post-click success validation — check that expected text
-        appeared in the target element after an interaction:
-
-            text = cli.get_text("@e3")
-            if "API Key" in text: ...
-
-        Corresponds to: agent-browser get text <ref_or_selector>
-        Returns empty string on any failure (element not found, browser closed).
-        """
         try:
             result = self._run("get", "text", ref_or_selector)
             return str(result["data"].get("text") or "")
@@ -601,10 +390,6 @@ class AgentBrowserCLI:
             return ""
 
     def find_ref(self, intent: str) -> str:
-        """
-        Try Agent Browser semantic `find` commands and return a discovered ref.
-        Returns "" when no ref can be extracted.
-        """
         intent = (intent or "").strip()
         if not intent:
             return ""
@@ -738,7 +523,6 @@ class AgentBrowserCLI:
         before: AgentBrowserSnapshot,
         after: AgentBrowserSnapshot,
     ) -> Dict[str, Any]:
-        """Instance wrapper for snapshot diffing used by step runner."""
         return compare_snapshots(before, after)
 
 
@@ -746,16 +530,6 @@ class AgentBrowserCLI:
 
 
     def _save_raw_snapshot(self, result: CommandResult) -> str:
-        """
-        Persist the raw CLI output from a snapshot command to disk.
-
-        Saves to app/data/ab_snapshots/snapshot_{session}_{utc_ts}.json.
-        Creates the directory if it does not exist.
-
-        Returns the file path string on success, or "" if the write fails
-        (logged as a warning; never raises — disk errors must not abort the
-        experiment pipeline).
-        """
         try:
             _SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
             ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
@@ -789,45 +563,6 @@ class AgentBrowserCLI:
         current_url: str,
         raw_snapshot_path: str,
     ) -> AgentBrowserSnapshot:
-        """
-        Convert a raw CLI CommandResult into a normalized AgentBrowserSnapshot.
-
-        Expected agent-browser JSON envelope (with --json):
-            {
-                "success": true,
-                "data": {
-                    "snapshot": "<accessibility tree text>",
-                    "refs": {
-                        "e1": {"role": "button", "name": "Submit"},
-                        "e2": {"role": "textbox", "name": "Email"},
-                        ...
-                    }
-                }
-            }
-
-        Normalization rules per element:
-            ref     — "@{ref_id}" (@ prefix added; agent-browser omits it in
-                       the refs dict keys)
-            role    — lowercased; empty string if absent
-            name    — stripped; empty string if absent
-            url     — current_url at snapshot time
-            visible — always True (interactive snapshot only surfaces visible
-                       interactive elements)
-
-        Snapshot bucketing:
-            interactive_elements — only the allowlisted actionable roles used
-                                   by the ref selector.
-            context_elements     — everything else from the snapshot, preserved
-                                   for debugging and validation only.
-
-        If refs dict is empty or missing, interactive_elements will be an
-        empty list. This is a valid result (e.g. a blank page or a page with
-        no interactive elements), not an error.
-
-        snapshot_text falls back to raw stdout if the "snapshot" key is
-        absent from data (defensive: handles plain-text output if --json
-        was not honoured by an older CLI version).
-        """
         data = result.get("data") or {}
         refs: Dict[str, Any] = data.get("refs") or {}
         snapshot_text: str = data.get("snapshot") or result["stdout"]

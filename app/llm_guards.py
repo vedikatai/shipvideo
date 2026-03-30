@@ -1,23 +1,3 @@
-"""
-LLM cost and safety guards. Change limits and behavior here without touching pipeline logic.
-
-- max_completion_tokens: cap Azure response size
-- budget: pause LLM spend above a limit in your Azure billing currency (INR, USD, …)
-- dedupe: skip re-running for the same PR+commit (redeliveries)
-- skip_llm_for_size: skip LLM when diff payload is too large (use fallback steps)
-
-Optional: set AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-to use Azure Cost Management API for real month-to-date spend (same currency Azure bills in).
-
-Env:
-  BILLING_CURRENCY   — ISO code, default INR (e.g. INR, USD)
-  BUDGET_LIMIT       — cap in that currency (preferred)
-  BUDGET_LIMIT_USD   — legacy alias for BUDGET_LIMIT (same numeric meaning: your billing currency)
-  PRICE_PER_1K_INPUT / PRICE_PER_1K_OUTPUT — per-1K-token estimate in BILLING_CURRENCY (for local logs only)
-
-Optional: set AZURE_BILLING_ACCOUNT_ID to fetch current credit balance (Consumption Balances API).
-When Azure is configured, expenditure/remaining/budget come from Azure only; we do not write to the local spend file.
-"""
 from __future__ import annotations
 
 import json
@@ -34,10 +14,8 @@ except ImportError:
 
 
 MAX_RESPONSE_TOKENS = 500
-"""Cap on Azure response tokens so a single response can't be huge."""
 
 BILLING_CURRENCY = os.getenv("BILLING_CURRENCY", "INR").strip().upper() or "INR"
-"""Azure subscription billing currency (Cost Management MTD is returned in this currency)."""
 
 
 def _resolve_budget_limit() -> float:
@@ -52,13 +30,11 @@ def _resolve_budget_limit() -> float:
 
 
 BUDGET_LIMIT = _resolve_budget_limit()
-"""Budget cap in BILLING_CURRENCY. When Azure MTD spend exceeds this, we skip LLM (month-to-date)."""
 
 
 BUDGET_LIMIT_USD = BUDGET_LIMIT
 
 MAX_DIFF_CHARS_TO_SKIP_LLM = 12_000
-"""If diff payload (after our normal truncation) exceeds this, skip LLM and use fallback."""
 
 
 
@@ -81,7 +57,6 @@ _lock = threading.Lock()
 
 
 def format_currency_amount(amount: float, currency: str | None = None) -> str:
-    """Format a monetary amount for logs (uses BILLING_CURRENCY by default)."""
     cur = (currency or BILLING_CURRENCY).upper()
     sym = {"INR": "₹", "USD": "$", "EUR": "€", "GBP": "£"}.get(cur, f"{cur} ")
 
@@ -91,7 +66,6 @@ def format_currency_amount(amount: float, currency: str | None = None) -> str:
 
 
 def _azure_configured() -> bool:
-    """True if Azure Cost Management env vars are set (Azure is source of truth for spend)."""
     return bool(
         os.getenv("AZURE_SUBSCRIPTION_ID")
         and os.getenv("AZURE_TENANT_ID")
@@ -109,7 +83,6 @@ AZURE_SPEND_CACHE_SECONDS = 300
 
 
 def _get_azure_token() -> str | None:
-    """Get Azure AD token for management.azure.com. Returns None if not configured or on error."""
     tenant = os.getenv("AZURE_TENANT_ID")
     client_id = os.getenv("AZURE_CLIENT_ID")
     client_secret = os.getenv("AZURE_CLIENT_SECRET")
@@ -135,11 +108,6 @@ def _get_azure_token() -> str | None:
 
 
 def fetch_azure_cost_month_to_date() -> float | None:
-    """
-    Fetch current month-to-date spend from Azure Cost Management API (subscription billing currency).
-    Requires env: AZURE_SUBSCRIPTION_ID, AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET.
-    Returns None if not configured or on error.
-    """
     global _azure_spend_cache, _azure_spend_cache_ts
     import time as _time
     now = _time.time()
@@ -186,11 +154,6 @@ def fetch_azure_cost_month_to_date() -> float | None:
 
 
 def fetch_azure_credit_balance() -> dict | None:
-    """
-    Fetch current Azure credit balance (Microsoft Customer Agreement / billing account).
-    Requires env: AZURE_BILLING_ACCOUNT_ID plus AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET.
-    Returns None if not configured or on error. Response includes balance, currency, utilized, etc.
-    """
     global _azure_balance_cache, _azure_balance_cache_ts
     import time as _time
     now = _time.time()
@@ -238,11 +201,6 @@ def fetch_azure_credit_balance() -> dict | None:
 
 
 def get_budget_status() -> dict:
-    """
-    Return current spend, limit, and optional credit balance. Prefers Azure Cost Management
-    when configured; otherwise uses local spend file. When AZURE_BILLING_ACCOUNT_ID is set,
-    includes current Azure credit balance.
-    """
     spend_azure = fetch_azure_cost_month_to_date()
     balance_info = fetch_azure_credit_balance()
     result: dict = {}
@@ -285,15 +243,10 @@ def _ensure_data_dir() -> None:
 
 
 def get_max_completion_tokens() -> int:
-    """Max tokens to allow for Azure chat completion response."""
     return MAX_RESPONSE_TOKENS
 
 
 def check_budget() -> bool:
-    """
-    True if under budget (ok to call LLM). False if over budget (use fallback, don't call LLM).
-    Uses Azure Cost Management month-to-date spend when env vars are set; otherwise local spend file.
-    """
     spend_azure = fetch_azure_cost_month_to_date()
     if spend_azure is not None:
         print(
@@ -327,17 +280,10 @@ def check_budget() -> bool:
 
 
 def estimate_run_cost(prompt_tokens: int, completion_tokens: int) -> float:
-    """Estimated cost in BILLING_CURRENCY for one LLM call (for run summary; tune PRICE_PER_1K_*)."""
     return (prompt_tokens / 1000.0) * PRICE_PER_1K_INPUT + (completion_tokens / 1000.0) * PRICE_PER_1K_OUTPUT
 
 
 def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
-    """
-    Record estimated cost from a single LLM call.
-    When Azure Cost Management is configured, we do not update the local spend file;
-    expenditure, remaining balance, and budget come from Azure only.
-    When Azure is not configured, we update the local file for check_budget() / get_budget_status().
-    """
     estimated = estimate_run_cost(prompt_tokens, completion_tokens)
     if _azure_configured():
         print(
@@ -375,7 +321,6 @@ def record_spend(prompt_tokens: int, completion_tokens: int) -> None:
 
 
 def check_already_ran(repo: str, pr_number: int, commit_sha: str) -> bool:
-    """True if we already ran for this repo + PR + commit (e.g. redelivery)."""
     if not DEDUPE_ENABLED:
         print("[llm-guards] Dedupe disabled via LLM_DEDUPE_ENABLED, always running", flush=True)
         return False
@@ -398,7 +343,6 @@ def check_already_ran(repo: str, pr_number: int, commit_sha: str) -> bool:
 
 
 def record_run(repo: str, pr_number: int, commit_sha: str) -> None:
-    """Mark that we ran for this repo + PR + commit (call at start of pipeline for this PR)."""
     if not commit_sha:
         return
     key = f"{repo}#{pr_number}#{commit_sha}"
@@ -420,7 +364,6 @@ def record_run(repo: str, pr_number: int, commit_sha: str) -> None:
 
 
 def should_skip_llm_for_size(diff_char_count: int) -> bool:
-    """True if diff payload is too large; use fallback steps instead of calling LLM."""
     if diff_char_count > MAX_DIFF_CHARS_TO_SKIP_LLM:
         print(f"[llm-guards] Diff size {diff_char_count} > {MAX_DIFF_CHARS_TO_SKIP_LLM}, skipping LLM", flush=True)
         return True

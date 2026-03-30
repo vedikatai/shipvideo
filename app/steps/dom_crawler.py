@@ -1,14 +1,3 @@
-"""
-DOM crawler: discovers routes and collects UI elements from a staging URL.
-
-Phase 3 upgrade: multi-route BFS seeded by diff-inferred routes and routeMap.
-One BrowserContext is launched and a fresh page is created per route — this
-preserves cookies/localStorage across visits without carrying scroll or modal
-state between routes.
-
-Public API:
-    crawl_dom_data(staging_url, *, seed_routes, max_routes) -> DomSnapshot
-"""
 import time
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
@@ -28,12 +17,6 @@ _AUTH_WALL_SEGMENTS = frozenset({"login", "signin", "auth", "unauthorized"})
 
 
 def _is_auth_wall(url: str) -> bool:
-    """Return True if the URL path signals a redirect to an authentication wall.
-
-    Extracts the URL path via urlparse and checks only the first path segment,
-    preventing false positives on routes like /authors, /authenticate, or URLs
-    with auth-related query parameters.
-    """
     try:
         path = urlparse(url).path
     except Exception:
@@ -49,13 +32,6 @@ def _is_auth_wall(url: str) -> bool:
 
 
 async def _discover_routes(page, staging_url: str) -> List[str]:
-    """
-    Discover internal routes from a live staging URL using an existing page.
-    Returns a list of clean paths starting with '/'.
-
-    Query strings (?ref=nav) and fragments (#section) are stripped to avoid
-    treating parameterised copies of the same page as distinct routes.
-    """
     try:
         print(f"[dom] discovering routes url={staging_url}", flush=True)
         await page.goto(staging_url, timeout=15000)
@@ -93,18 +69,6 @@ def _build_visit_order(
     discovered: List[str],
     max_routes: int,
 ) -> List[str]:
-    """
-    Return the ordered list of routes to crawl, capped at max_routes.
-
-    Priority: seed_routes first (diff-inferred + routeMap; already ordered by
-    the caller with highest-value routes first), then homepage-discovered links
-    (sorted for determinism).
-
-    "/" is ALWAYS included: the homepage contains global navigation elements
-    (main menu, header links) that ground click steps on every route.  If "/"
-    is not already present in seed_routes, one slot is reserved for it so that
-    filling seed slots cannot crowd it out.
-    """
     home_in_seeds = "/" in seed_routes
 
     effective_max = max_routes if home_in_seeds else max(1, max_routes - 1)
@@ -163,11 +127,6 @@ def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
 
 
 async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
-    """
-    Extract UI elements from an already-navigated page (no navigation side-effect).
-    Returns a dict matching ButtonCandidate / LinkCandidate / InputCandidate /
-    TestIdCandidate schemas from dom_schema.py.
-    """
     buttons = await page.eval_on_selector_all(
         "button, [role='button'], input[type='button'], input[type='submit']",
         """els => els.slice(0, 100).map(e => ({
@@ -261,10 +220,6 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
 
 
 async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
-    """
-    Navigate to url then extract UI elements.
-    Kept for backward-compat; not used by the multi-route crawl_dom_data path.
-    """
     try:
         print(f"[dom] collecting UI elements url={url}", flush=True)
         await page.goto(url, timeout=15000)
@@ -287,15 +242,6 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
 
 
 def _merge_snapshots(route_snapshots: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Merge per-route UI snapshots into top-level union fields.
-
-    Deduplication rules across routes:
-      buttons  — by testid (if non-empty) else text.lower()
-      links    — by href
-      inputs   — by name + "|" + placeholder
-      testids  — by testid value
-    """
     seen_btn: set = set()
     seen_href: set = set()
     seen_inp: set = set()
@@ -350,28 +296,6 @@ async def crawl_dom_data(
     seed_routes: Optional[List[str]] = None,
     max_routes: int = 6,
 ) -> DomSnapshot:
-    """
-    Multi-route BFS crawl over staging_url.
-
-    Visit order (capped at max_routes):
-      1. seed_routes  — diff-inferred + routeMap routes, highest priority.
-      2. Homepage-discovered <a href> links — sorted for determinism.
-
-    One BrowserContext is used for all routes; each route gets its own fresh
-    page (context.new_page() / page.close()) to avoid carrying scroll or
-    overlay state while preserving cookies/localStorage across visits.
-
-    Per-route:
-      - Timeout: 12 s networkidle.
-      - Auth-wall guard: if page.url contains /login, /signin, /auth, or
-        /unauthorized after navigation, the route is skipped silently.
-      - All exceptions are caught per-route; the crawl continues.
-
-    Returns a DomSnapshot with:
-      top-level buttons/links/inputs/data_testids — merged + deduped across routes.
-      routes        — union of discovered homepage links and seed_routes.
-      route_snapshots — per-route raw UI data (extra key, not in DomSnapshot typedef).
-    """
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -483,30 +407,6 @@ def crawl_ab_routes(
     *,
     session: str = "ab_crawl",
 ) -> Dict[str, AgentBrowserSnapshot]:
-    """
-    Agent Browser-backed targeted route crawl for experiment accuracy validation.
-
-    Visits each route in routes using AgentBrowserCLI and returns a mapping
-    route_path → AgentBrowserSnapshot.  Used in Phase 4 to validate route-aware
-    accuracy alongside the Playwright crawl_dom_data() path.
-
-    Unlike crawl_dom_data() (which performs BFS discovery and DOM extraction),
-    this function only visits the explicitly-provided routes and returns
-    normalized AgentBrowserSnapshot objects ready for use with ref_selector.
-
-    The snapshots can be merged into a comparison-ready structure using
-    app.context.dom_extractor.merge_ab_route_snapshots().
-
-    Args:
-        base_url — base URL of the deployment (e.g. "https://preview.example.com").
-        routes   — list of relative route paths to visit (e.g. ["/", "/settings"]).
-        session  — agent-browser session name for isolation.
-
-    Returns:
-        Dict mapping each successfully-crawled route path to its
-        AgentBrowserSnapshot.  Routes that failed (CLI error, timeout) are
-        omitted from the result — failures are logged but never raise.
-    """
 
 
     from app.browser.agent_browser_cli import AgentBrowserCLI, AgentBrowserError

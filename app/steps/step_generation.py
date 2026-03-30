@@ -1,17 +1,5 @@
 
 
-"""
-Step generation: produce a grounded list of capture steps (and narration) from
-PR diff + live DOM.
-
-Changes from previous version:
-- Two-phase LLM: extraction call first, planning call second.
-- validate_against_dom now annotates instead of dropping click steps.
-- preflight_gate blocks invalid plans before browser opens.
-- One replan attempt when preflight fails, then ContractIntegrityError.
-- normalize_steps bug fixed: validation metadata now actually preserved.
-- assert_terminal injected into last click when contract has terminal condition.
-"""
 from __future__ import annotations
 
 import json
@@ -173,10 +161,6 @@ def _call_llm(
     *,
     response_schema: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
-    """
-    Call Azure OpenAI with structured output.
-    Falls back to json_object if json_schema is unsupported.
-    """
     schema = response_schema or _DEMO_FLOW_JSON_SCHEMA
     try:
         completion = client.chat.completions.create(
@@ -241,10 +225,6 @@ def _run_extraction_phase(
     contract: Optional[Any],
     max_tokens: int,
 ) -> Tuple[Dict[str, Any], float]:
-    """
-    Phase 1: extract start_route, terminal_testid, click_labels from diff only.
-    Returns (extraction_data, cost_usd).
-    """
     interaction_hints: List[str] = []
     if contract is not None:
         try:
@@ -397,11 +377,6 @@ def _inject_terminal_assertion(
     steps: List[Dict[str, Any]],
     contract: Optional[Any],
 ) -> List[Dict[str, Any]]:
-    """
-    Inject an assert_terminal step after the last click if:
-    - contract has a terminal condition
-    - no assert_terminal step already exists
-    """
     if contract is None:
         return steps
 
@@ -443,12 +418,6 @@ def _inject_click_validation_from_terminal(
     steps: List[Dict[str, Any]],
     contract: Optional[Any],
 ) -> List[Dict[str, Any]]:
-    """
-    Attach validation_condition to the last click before terminal assertion.
-
-    This lets run_ab_stepwise detect wrong clicks immediately instead of only
-    failing at the final assert_terminal step.
-    """
     if contract is None:
         return steps
     terminal = getattr(contract, "terminal", None)
@@ -497,7 +466,6 @@ def _build_planning_prompt(
     app_hints_text: str,
     preflight_errors: Optional[List[str]] = None,
 ) -> Tuple[str, str]:
-    """Build system + user messages for the planning LLM call."""
 
     extraction_block = ""
     if extraction:
@@ -604,14 +572,6 @@ async def generate_steps_from_diff(
     general_demo: bool = False,
     contract: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """
-    Two-phase step generation:
-    Phase 1 — extraction LLM call: start_route, terminal_testid, click_labels.
-    Phase 2 — planning LLM call: full step list grounded in extraction + DOM.
-
-    Pre-flight gate validates plan against contract before returning.
-    One replan attempt on pre-flight failure. ContractIntegrityError on second failure.
-    """
     fallback_narration = _fallback_narration(pr_title)
     total_cost = 0.0
 

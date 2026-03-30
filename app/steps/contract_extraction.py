@@ -1,10 +1,3 @@
-"""
-Static contract extraction from PR diffs.
-
-Derives start_route, targets, and terminal condition from file paths and
-changed code without any LLM call. This is the primary independent contract
-source that breaks circular validation.
-"""
 from __future__ import annotations
 
 import re
@@ -17,7 +10,6 @@ from app.steps.step_normalizer import _extract_routes_from_diff
 def extract_contract_static(
     diff_files: List[Dict[str, str]],
 ) -> DemoContract:
-    """Build a DemoContract from static diff analysis only."""
     start_route = _infer_start_route(diff_files)
     targets = _extract_targets(diff_files)
     terminal = _detect_terminal(diff_files)

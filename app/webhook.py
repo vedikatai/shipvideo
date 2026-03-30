@@ -89,7 +89,6 @@ def get_video(request: Request):
 
 @app.get("/budget-status")
 def budget_status():
-    """Return current spend and limit (Azure Cost Management or local). For monitoring."""
     return get_budget_status()
 
 

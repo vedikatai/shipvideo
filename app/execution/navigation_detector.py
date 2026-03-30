@@ -38,7 +38,6 @@ class NavigationState:
 
 
 def _dom_signature(page: Page) -> str:
-    """Raw body-text hash — used only by wait_stable_after_navigation."""
     text = page.evaluate(
         "() => ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 4000)"
     ) or ""
@@ -46,18 +45,6 @@ def _dom_signature(page: Page) -> str:
 
 
 def _collect_page_fingerprint(page: Page) -> PageFingerprint:
-    """
-    Collect structural page signals via a single page.evaluate() call.
-
-    Signals collected:
-      - path: window.location.pathname
-      - title: document.title
-      - headings: first 5 h1/h2 innerTexts, sorted
-      - testids: first 20 data-testid values, sorted
-      - landmarks: count of [role=main], main, [role=dialog], [role=alertdialog],
-          [role=navigation], nav, [role=banner], header, [role=contentinfo],
-          footer, aside
-    """
     result: Any = page.evaluate("""() => {
         const hs = [...document.querySelectorAll('h1,h2')]
             .slice(0, 5)
@@ -100,16 +87,6 @@ def capture_state(page: Page) -> NavigationState:
 
 
 def detect_major_change(before: NavigationState, after: NavigationState) -> bool:
-    """
-    Return True when the page has undergone a semantically significant change.
-
-    Tier 1 — path change: always a major change.
-    Tier 2 — structural change: title, headings, or testid layout changed.
-    Tier 3 — landmark delta >= 2: modal opened, panel added, etc.
-
-    Counter increments, toast messages, and notification badges change only
-    body text (not captured here), so they no longer trigger a spurious replan.
-    """
     if before.path != after.path:
         return True
 
@@ -128,12 +105,6 @@ def detect_major_change(before: NavigationState, after: NavigationState) -> bool
 
 
 def wait_stable_after_navigation(page: Page, timeout_ms: int = 12000) -> None:
-    """
-    Poll until the page body text stabilises (3 consecutive identical hashes).
-
-    Uses the raw _dom_signature (body-text hash) because this function only
-    needs self-consistency — is the page still changing? — not semantic meaning.
-    """
     deadline = time.monotonic() + timeout_ms / 1000.0
     last_hash = None
     stable_hits = 0

@@ -38,16 +38,6 @@ def preflight_gate(
     steps: List[Dict[str, Any]],
     contract: Optional[Any],
 ) -> PreflightResult:
-    """
-    Hard gate between planning and execution.
-    A plan that fails this gate never opens the browser.
-
-    Checks:
-    1. Correct start route
-    2. All required contract targets covered at acceptable confidence
-    3. Explicit assert_terminal step exists and matches contract
-    4. Plan is not degenerate (zero clicks)
-    """
     if contract is None:
 
         return PreflightResult(

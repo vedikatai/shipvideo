@@ -1,17 +1,3 @@
-"""
-Trigger evaluation: decide whether a PR diff warrants a demo run.
-
-Exports:
-  is_ui_file(path)          — shared classifier used here and by Phase 5 diff_budget.
-  score_file(path) -> int   — 2/1/0 priority score for diff budgeting.
-  evaluate_trigger(...)     — full trigger decision with mode/threshold/force logic.
-  TriggerDecision           — dataclass returned by evaluate_trigger.
-
-Extension/directory heuristic mirrors isUIFile() from:
-  third_party/git-glimpse/packages/core/src/analyzer/diff-parser.ts
-with the addition of `src/app/` as an explicit primary directory (Next.js `src/`
-convention) and `src/components/`, `src/pages/`, `src/routes/` equivalents.
-"""
 from __future__ import annotations
 
 import logging
@@ -63,15 +49,6 @@ _UI_SECONDARY_DIRS: tuple = (
 
 
 def is_ui_file(path: str) -> bool:
-    """
-    Return True if path is likely a UI source file.
-
-    Logic (mirrors isUIFile from Glimpse diff-parser.ts):
-    1. Reject any path matching a non-UI pattern (.test., .spec., .md, etc.)
-    2. Require a UI extension (.tsx, .jsx, .ts, .js, .vue, .svelte, .css, .scss, .html)
-    3. Accept if path starts with any primary or secondary UI directory,
-       OR if the path contains '/' (i.e. is not a lone root-level file).
-    """
     for pattern in NON_UI_PATTERNS:
         if pattern in path:
             return False
@@ -85,14 +62,6 @@ def is_ui_file(path: str) -> bool:
 
 
 def score_file(path: str) -> int:
-    """
-    Return a diff-budget priority score:
-      2 — primary UI  (direct rendered output, e.g. app/pricing/page.tsx)
-      1 — secondary UI (adjacent, e.g. src/utils/format.ts)
-      0 — non-UI      (tests, docs, config, etc.)
-
-    Primary dirs are checked before secondary so that src/app/ scores 2, not 1.
-    """
     for pattern in NON_UI_PATTERNS:
         if pattern in path:
             return 0
@@ -127,12 +96,6 @@ class TriggerDecision:
 
 
 def _file_magnitude(f: Dict[str, Any]) -> int:
-    """
-    Return additions+deletions for a diff file dict.
-
-    Prefers explicit 'additions'/'deletions' keys (not present in the current
-    fetch_pr_diff output). Falls back to counting hunk lines in the patch text.
-    """
     explicit = int(f.get("additions") or 0) + int(f.get("deletions") or 0)
     if explicit > 0:
         return explicit
@@ -148,16 +111,6 @@ def evaluate_trigger(
     *,
     force: bool = False,
 ) -> TriggerDecision:
-    """
-    Decide whether the pipeline should run for this diff.
-
-    Modes (read from config["trigger"]["mode"]):
-      auto      — run if any UI file changed (default when mode is absent or unrecognised)
-      smart     — run only if matched UI files have additions+deletions >= threshold
-      on-demand — skip unless force=True
-
-    force=True overrides all mode checks and always returns should_run=True.
-    """
     trigger_cfg: Dict[str, Any] = config.get("trigger") or {}
     mode: str = (trigger_cfg.get("mode") or "auto").lower()
     threshold: int = int(trigger_cfg.get("threshold") or 5)

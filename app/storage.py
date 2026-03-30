@@ -31,12 +31,10 @@ def get_r2_client():
 
 
 def get_file_size_mb(file_path: Path) -> float:
-    """Get file size in MB."""
     return file_path.stat().st_size / (1024 * 1024)
 
 
 def list_videos(s3_client, bucket_name: str, prefix: str = "videos/") -> List[Tuple[str, datetime]]:
-    """List all videos in R2 bucket with their last modified dates."""
     videos = []
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
@@ -56,15 +54,6 @@ def list_videos(s3_client, bucket_name: str, prefix: str = "videos/") -> List[Tu
 
 
 def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
-    """
-    Clean up old videos to stay within free tier limits.
-
-    Keeps:
-    - Most recent N videos (default: 50)
-    - Videos newer than max_age_days (default: 30)
-
-    Deletes everything else.
-    """
     try:
         s3_client, bucket_name = get_r2_client()
         videos = list_videos(s3_client, bucket_name)
@@ -116,10 +105,6 @@ def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
 
 
 def check_storage_usage() -> Tuple[int, float]:
-    """
-    Check current storage usage.
-    Returns: (video_count, total_size_mb)
-    """
     try:
         s3_client, bucket_name = get_r2_client()
         videos = list_videos(s3_client, bucket_name)
@@ -140,14 +125,6 @@ def check_storage_usage() -> Tuple[int, float]:
 
 @pipeline_step("upload")
 def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = None) -> str:
-    """
-    Upload video to R2 with free tier safeguards.
-
-    Args:
-        local_path: Path to video file
-        auto_cleanup: Automatically clean old videos before upload (default: True)
-        pr_number: Optional PR number to include in filename
-    """
     if not local_path.exists():
         raise FileNotFoundError(local_path)
 

@@ -1,49 +1,3 @@
-"""
-Experiment logger — Phase 4 / Phase 5.
-
-Central artifact writer for the Agent Browser accuracy experiment.
-
-Responsibilities:
-    1. Define the fixed test suite of 5 flow categories required by Phase 4.
-    2. Record per-step and per-run experiment traces in a stable schema.
-    3. Compute comparable metrics for both the Playwright and Agent Browser
-       backends using the same calculation logic.
-    4. Save run_trace.json and run_summary.json to disk after each run.
-    5. Produce a side-by-side ComparisonReport when both backends have run
-       the same test case.
-    6. Produce a final experiment summary with explicit go / no-go thresholds
-       for Mode A (deterministic) runs.
-
-Logger schema (section 13 of the integration plan):
-    {
-      "run_id": "string",
-      "backend": "playwright|agent_browser_cli",
-      "mode": "deterministic|deterministic_plus_llm",
-      "test_case_id": "string",
-      "steps": [...],
-      "final_outcome": "passed|ambiguous|regressed|inconclusive"
-    }
-
-Per-run artifacts saved to disk (app/data/experiment_runs/<run_id>/):
-    run_trace.json   — full per-step trace
-    run_summary.json — aggregated metrics for direct backend comparison
-
-Test suite:
-    FIXED_TEST_SUITE defines 5 placeholder test cases covering the required
-    categories: semantic_button, navigation_link, custom_clickable,
-    ambiguous_target, post_nav_reanchor.
-
-    Override with real values for your preview URL by creating:
-        app/data/test_suite.json   (JSON array of TestCase dicts)
-
-Failure taxonomy (section 13):
-    NO_MATCH      — no ref found at any waterfall level.
-    AMBIGUOUS     — multiple refs matched; cannot safely select.
-    WRONG_CLICK   — click succeeded technically; expected state not reached.
-    CLICK_FAILED  — click command itself failed.
-    TIMEOUT       — snapshot or page load timed out.
-    STALE_REF     — ref valid in prior snapshot but invalid at action time.
-"""
 from __future__ import annotations
 
 import json
@@ -74,18 +28,6 @@ _EXPERIMENT_SUMMARY_PATH = _RUNS_DIR / "experiment_summary.json"
 
 
 class TestCase(TypedDict):
-    """
-    One fixed test case in the accuracy experiment suite.
-
-    Fields:
-        id                — unique identifier, e.g. "tc_01_semantic_button".
-        category          — one of the 5 required flow categories.
-        description       — human-readable description of the flow.
-        intent            — selection intent for the primary click step.
-        route             — relative path to navigate to, e.g. "/api-keys".
-        steps             — list of standard step dicts (action/text/url/selector).
-        success_condition — structured ground-truth validation rule.
-    """
 
     id: str
     category: str
@@ -209,18 +151,6 @@ FIXED_TEST_SUITE: List[TestCase] = [
 
 
 def load_test_suite(json_path: Optional[Path] = None) -> List[TestCase]:
-    """
-    Load test suite from JSON file if available; fall back to FIXED_TEST_SUITE.
-
-    Checks app/data/test_suite.json (or the provided path). Returns
-    FIXED_TEST_SUITE unchanged if the file is missing, empty, or invalid JSON.
-
-    Args:
-        json_path — explicit path; defaults to app/data/test_suite.json.
-
-    Returns:
-        List of TestCase dicts. Never raises.
-    """
     path = json_path or _TEST_SUITE_PATH
     if path.exists():
         try:
@@ -263,18 +193,6 @@ _OUTCOME_TO_TAXONOMY: Dict[str, str] = {
 
 
 def normalize_failure_taxonomy(outcome: str) -> str:
-    """
-    Map a step outcome string to the Phase 4 failure taxonomy.
-
-    Returns the taxonomy string (e.g. "NO_MATCH") for failure outcomes,
-    or "" for non-failure outcomes ("success", "pending", "ok", "").
-
-    Args:
-        outcome — raw step outcome string from the runner result.
-
-    Returns:
-        Taxonomy string or "" on success/non-failure.
-    """
     if not outcome or outcome in ("success", "pending", "ok", "unvalidated"):
         return ""
     for key, taxonomy in _OUTCOME_TO_TAXONOMY.items():
@@ -294,14 +212,6 @@ FinalOutcome = Literal["passed", "ambiguous", "regressed", "inconclusive"]
 
 
 class StepTrace(TypedDict):
-    """
-    Complete per-step experiment log for one executed action.
-
-    Populated by ExperimentLogger.finish_from_runner_result() from the step
-    results in the runner result dict. Fields unavailable for the Playwright
-    backend (chosen_ref, selection_reason, etc.) default to empty strings so
-    both backends produce structurally identical traces.
-    """
 
     step_index: int
     backend: str
@@ -329,11 +239,6 @@ class StepTrace(TypedDict):
 
 
 class RunTrace(TypedDict):
-    """
-    Full per-run experiment trace, saved to run_trace.json.
-
-    Matches the logger schema from section 13 of the integration plan.
-    """
 
     run_id: str
     backend: str
@@ -346,12 +251,6 @@ class RunTrace(TypedDict):
 
 
 class RunSummary(TypedDict):
-    """
-    Aggregated per-run metrics, saved to run_summary.json.
-
-    Contains the fields required for direct backend comparison
-    (Phase 4 Key Tasks 4 and 5).
-    """
 
     run_id: str
     backend: str
@@ -366,7 +265,6 @@ class RunSummary(TypedDict):
 
 
 class ThresholdChecks(TypedDict):
-    """Phase 5 go / no-go checks, evaluated on Mode A deterministic runs."""
 
     ab_at_least_as_good_on_core_paths: bool
     reduced_target_selection_failures: bool
@@ -374,7 +272,6 @@ class ThresholdChecks(TypedDict):
 
 
 class DecisionSummary(TypedDict):
-    """Top-level go / no-go decision emitted by summarize_experiment()."""
 
     outcome: FinalOutcome
     recommendation: str
@@ -385,7 +282,6 @@ class DecisionSummary(TypedDict):
 
 
 class TestCaseComparison(TypedDict):
-    """One test-case comparison entry in the aggregate experiment summary."""
 
     test_case_id: str
     mode: str
@@ -396,7 +292,6 @@ class TestCaseComparison(TypedDict):
 
 
 class ModeSummary(TypedDict):
-    """Aggregate summary for one AB mode (deterministic or deterministic_plus_llm)."""
 
     mode: str
     paired_baseline_available: bool
@@ -412,12 +307,6 @@ class ModeSummary(TypedDict):
 
 
 class ComparisonReport(TypedDict):
-    """
-    Side-by-side comparison of Playwright and Agent Browser run summaries.
-
-    Produced by compare_runs() when both backends have completed the same
-    test case. Saved to comparison_<test_case_id>.json by save_comparison().
-    """
 
     playwright: RunSummary
     agent_browser_cli: RunSummary
@@ -428,7 +317,6 @@ class ComparisonReport(TypedDict):
 
 
 class ExperimentSummary(TypedDict):
-    """Phase 5 final summary across all saved run summaries."""
 
     generated_at: str
     thresholds: ThresholdChecks
@@ -445,14 +333,6 @@ def _compute_metrics(
     total_initial_steps: int,
     retries_per_run: float,
 ) -> Dict[str, Any]:
-    """
-    Compute Phase 4 comparison metrics from a list of StepTrace objects.
-
-    Args:
-        steps               — per-step traces built by ExperimentLogger.
-        total_initial_steps — denominator for success_rate.
-        retries_per_run     — total retry count from the runner result.
-    """
     succeeded = sum(1 for s in steps if s["result"] == "success")
     wrong_click_count = sum(
         1 for s in steps if s["failure_taxonomy"] == "WRONG_CLICK"
@@ -486,7 +366,6 @@ _TARGET_SELECTION_FAILURES = frozenset({
 
 
 def _coerce_final_outcome(runner_result: Dict[str, Any]) -> FinalOutcome:
-    """Normalize runner final_outcome into the logger's Phase 5 categories."""
     value = str(runner_result.get("final_outcome") or "").strip().lower()
     if value in {"passed", "ambiguous", "regressed", "inconclusive"}:
         return value                              
@@ -503,7 +382,6 @@ def _coerce_final_outcome(runner_result: Dict[str, Any]) -> FinalOutcome:
 
 
 def _aggregate_run_summaries(summaries: List[RunSummary]) -> Dict[str, Any]:
-    """Average comparable metrics across a set of run summaries."""
     if not summaries:
         return {
             "run_count": 0,
@@ -535,7 +413,6 @@ def _aggregate_run_summaries(summaries: List[RunSummary]) -> Dict[str, Any]:
 
 
 def _target_selection_failure_count(metrics: Dict[str, Any]) -> int:
-    """Return selector / target-selection failure count from aggregated metrics."""
     counts = metrics.get("failure_type_counts") or {}
     return sum(int(counts.get(key, 0)) for key in _TARGET_SELECTION_FAILURES)
 
@@ -545,31 +422,6 @@ def _target_selection_failure_count(metrics: Dict[str, Any]) -> int:
 
 
 class ExperimentLogger:
-    """
-    Central artifact writer for the Agent Browser accuracy experiment.
-
-    Converts a runner result dict (from run_stepwise or run_ab_stepwise)
-    into a structured experiment trace and saves two JSON artifacts:
-        run_trace.json   — full per-step trace
-        run_summary.json — aggregated metrics for comparison
-
-    Both Playwright and Agent Browser runs produce the same artifact schema.
-    Fields absent from the Playwright step results (chosen_ref, selection_reason,
-    etc.) default to empty strings so traces remain structurally comparable.
-
-    Usage:
-        logger = ExperimentLogger(
-            backend="agent_browser_cli",
-            mode="deterministic",
-            test_case_id="tc_01_semantic_button",
-        )
-        runner_result = run_ab_stepwise(...)
-        trace = logger.finish_from_runner_result(runner_result)
-        # → artifacts saved to app/data/experiment_runs/<run_id>/
-
-    The returned RunTrace can be passed to compare_runs() alongside a
-    RunTrace from the Playwright backend for direct comparison.
-    """
 
     def __init__(
         self,
@@ -589,20 +441,6 @@ class ExperimentLogger:
         self,
         runner_result: Dict[str, Any],
     ) -> RunTrace:
-        """
-        Build and persist run artifacts from a raw runner result dict.
-
-        Accepts the dict returned by run_stepwise() or run_ab_stepwise().
-        Step fields absent from Playwright results (chosen_ref, intent, etc.)
-        default to empty strings so both backends produce comparable traces.
-
-        Args:
-            runner_result — dict from run_stepwise or run_ab_stepwise.
-
-        Returns:
-            The completed RunTrace; also saved to disk as run_trace.json and
-            run_summary.json in app/data/experiment_runs/<run_id>/.
-        """
         raw_steps = runner_result.get("results") or []
         step_traces: List[StepTrace] = []
 
@@ -688,7 +526,6 @@ class ExperimentLogger:
         return trace_obj
 
     def _save(self, trace: RunTrace) -> None:
-        """Persist run_trace.json and run_summary.json to the artifact directory."""
         try:
             self._artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -734,20 +571,6 @@ def compare_runs(
     playwright_summary: RunSummary,
     ab_summary: RunSummary,
 ) -> ComparisonReport:
-    """
-    Produce a structured side-by-side comparison of two RunSummary objects.
-
-    Determines a winner based on success rate. Notes differences in
-    wrong-click counts, failure distributions, and step latency so the
-    comparison can be reviewed by artifact, not by memory.
-
-    Args:
-        playwright_summary — RunSummary from a run_stepwise (Playwright) run.
-        ab_summary         — RunSummary from a run_ab_stepwise run.
-
-    Returns:
-        ComparisonReport with playwright, agent_browser_cli, winner, notes.
-    """
     notes: List[str] = []
 
     pw_sr = playwright_summary["success_rate"]
@@ -822,13 +645,6 @@ def compare_runs(
 
 
 def save_comparison(report: ComparisonReport, artifact_dir: Path) -> None:
-    """
-    Save a ComparisonReport to comparison_<test_case_id>.json.
-
-    Args:
-        report       — output of compare_runs().
-        artifact_dir — directory to write the file; typically app/data/experiment_runs/.
-    """
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         test_case_id = (
@@ -854,12 +670,6 @@ def save_comparison(report: ComparisonReport, artifact_dir: Path) -> None:
 
 
 def load_run_summaries(runs_dir: Path = _RUNS_DIR) -> List[RunSummary]:
-    """
-    Load the latest saved run summaries from disk.
-
-    Deduplicates by (backend, mode, test_case_id), keeping the most recently
-    modified summary file for each key.
-    """
     latest_by_key: Dict[tuple[str, str, str], tuple[float, RunSummary]] = {}
     for path in runs_dir.rglob("run_summary.json"):
         try:
@@ -884,14 +694,6 @@ def load_run_summaries(runs_dir: Path = _RUNS_DIR) -> List[RunSummary]:
 
 
 def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
-    """
-    Build the Phase 5 aggregate experiment summary from per-run summaries.
-
-    Decision rules are evaluated on Mode A (`deterministic`) only:
-        1. AB success rate >= Playwright success rate on paired core paths
-        2. AB target-selection failures are reduced
-        3. AB failures remain explainable from saved artifacts
-    """
     mode_summaries: List[ModeSummary] = []
     play_by_test = {
         s["test_case_id"]: s for s in run_summaries if s["backend"] == "playwright"
@@ -1050,9 +852,6 @@ def summarize_experiment(run_summaries: List[RunSummary]) -> ExperimentSummary:
 
 
 def summarize_artifacts(runs_dir: Path = _RUNS_DIR) -> ExperimentSummary:
-    """
-    Load run summaries from disk, aggregate them, and save experiment_summary.json.
-    """
     summary = summarize_experiment(load_run_summaries(runs_dir))
     try:
         runs_dir.mkdir(parents=True, exist_ok=True)

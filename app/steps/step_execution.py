@@ -1,20 +1,3 @@
-"""
-Step execution: entry point that runs capture steps against a preview URL.
-
-Delegates all step-by-step execution, navigation detection, and retry logic
-to app.execution.step_runner.
-
-Backend switch (Phase 3 / Phase 5):
-    Default capture backend is Agent Browser CLI (run_ab_stepwise). Set
-    BROWSER_BACKEND=playwright to use the legacy Playwright stepwise runner.
-
-    BROWSER_BACKEND=agent_browser_cli  — default when unset
-    BROWSER_BACKEND=playwright          — opt-in legacy Playwright stepwise
-
-    Optionally set EXPERIMENT_MODE to control the ref-selection mode:
-    EXPERIMENT_MODE=deterministic           — Mode A (default, baseline)
-    EXPERIMENT_MODE=deterministic_plus_llm  — Mode B (LLM fallback scaffold)
-"""
 from __future__ import annotations
 
 import os
@@ -65,7 +48,6 @@ _DEFAULT_BACKEND: BrowserBackend = "agent_browser_cli"
 
 
 def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
-    """Return a validated SuccessCondition dict, or None when invalid/missing."""
     if not isinstance(raw, dict):
         return None
     cond_type = str(raw.get("type") or "").strip()
@@ -81,16 +63,6 @@ def _attach_test_case_success_conditions(
     steps: List[Dict[str, Any]],
     test_case_id: str,
 ) -> List[Dict[str, Any]]:
-    """
-    Copy fixed-suite step success conditions onto the runtime steps when possible.
-
-    Small safe assumption:
-        - Step-local success_condition always wins.
-        - When test_case_id resolves to a fixed test case, index-aligned click
-          steps inherit the test case step's success_condition if present.
-        - If no step-level condition is present on the last click step, fall back
-          to the test case's top-level success_condition.
-    """
     cloned_steps = [dict(step) for step in steps]
     for step in cloned_steps:
         explicit = (
@@ -149,14 +121,6 @@ def _lookup_benchmark_result(
     mode: str,
     test_case_id: str,
 ) -> Dict[str, Any]:
-    """
-    Return paired benchmark metadata for one test case from experiment_summary.
-
-    This separates:
-      - single-run health (`final_outcome`)
-      - paired benchmark result for this test case
-      - repo-level recommendation
-    """
     for mode_summary in experiment_summary.get("mode_summaries") or []:
         if str(mode_summary.get("mode") or "") != mode:
             continue
@@ -181,40 +145,6 @@ def run_capture(
     generation_context: Optional[Dict[str, Any]] = None,
     test_case_id: str = "",
 ) -> Dict[str, Any]:
-    """
-    Execute capture steps against the preview URL and write screenshots to disk.
-
-    Dispatches to the Playwright runner (default) or the Agent Browser
-    experiment runner based on the BROWSER_BACKEND environment variable.
-
-    Phase 4 / Phase 5 additions (backward-compatible):
-        test_case_id — optional experiment test case identifier. When non-empty,
-                       run artifacts (run_trace.json, run_summary.json) are saved
-                       to app/data/experiment_runs/<run_id>/ via ExperimentLogger.
-        backend      — added to return dict so callers can identify which backend ran.
-        mode         — added to return dict for experiment run traceability.
-        test_case_id — echoed in return dict for downstream comparison logic.
-        final_outcome — single-run health for this backend invocation.
-        benchmark_outcome / benchmark_has_paired_baseline — paired benchmark
-                       result for this test case when a Playwright baseline exists.
-        repo_decision_outcome / repo_recommendation / promotion_allowed — repo-level
-                       Phase 5 decision fields. These do not change the default backend.
-
-    Args:
-        preview_url:        Base URL of the preview deployment.
-        steps:              List of step dicts (action/url/selector/text).
-        screenshot_dir:     Directory for shot*.png; defaults to app/screenshots.
-        generation_context: Optional context dict from step generation.
-        test_case_id:       Phase 4: experiment test case identifier. Pass one of
-                            the FIXED_TEST_SUITE ids (e.g. "tc_01_semantic_button")
-                            to trigger artifact persistence.
-
-    Returns:
-        Dict with steps_succeeded, steps_failed, failure_reason, success, debug,
-        backend, mode, test_case_id, final_outcome, benchmark_outcome,
-        benchmark_has_paired_baseline, repo_decision_outcome,
-        repo_recommendation, decision_outcome, promotion_allowed, default_backend.
-    """
     if not preview_url:
         raise ValueError("preview_url cannot be None or empty")
     steps = steps or DEFAULT_STEPS

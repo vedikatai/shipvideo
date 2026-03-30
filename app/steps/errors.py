@@ -1,4 +1,3 @@
-"""Typed errors for the demo pipeline (contract, planning, integrity)."""
 from __future__ import annotations
 from typing import List, Optional
 class ContractIntegrityError(Exception):

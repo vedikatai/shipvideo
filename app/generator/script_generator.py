@@ -1,16 +1,3 @@
-"""
-Script generator: uses the LLM to produce a complete, executable Playwright
-`run_demo(page, context)` function from diff + DOM context + suggested_demo_flow.
-
-The generated function is intentionally narrow in contract:
-  - Receives a Playwright Page (already loaded at base_url) and BrowserContext.
-  - `base_url` is available as a module-level variable in its execution scope.
-  - Must NOT call sync_playwright(), launch browsers, or close the browser/context.
-  - Uses Playwright semantic locators (get_by_role, get_by_text, get_by_test_id).
-
-Retry: on execution failure, the previous script + error are sent back for repair.
-Max 2 retries before propagating the error to the fallback pipeline.
-"""
 from __future__ import annotations
 
 import json
@@ -70,7 +57,6 @@ def _get_client() -> Any:
 
 
 def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> str:
-    """Call LLM with json_schema, fall back to json_object if unsupported."""
     try:
         completion = client.chat.completions.create(
             model=deployment,
@@ -105,10 +91,6 @@ def _call_llm(client: Any, deployment: str, messages: List[Dict[str, str]]) -> s
 
 
 def _build_action_menu(dom_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Build a concrete 'what you can click' menu from live DOM data.
-    This is injected directly into the prompt so the LLM never has to guess.
-    """
     clickable = []
     for b in (dom_data.get("buttons") or [])[:20]:
         entry: Dict[str, str] = {}
@@ -211,15 +193,6 @@ def generate_playwright_script(
     previous_script: Optional[str] = None,
     previous_error: Optional[str] = None,
 ) -> str:
-    """
-    Generate a complete `def run_demo(page, context):` Playwright function.
-
-    On retry (previous_script + previous_error provided) the LLM receives the
-    broken script and error context and outputs a repaired version.
-
-    Returns the raw Python source string.
-    Raises RuntimeError if generation fails after retries.
-    """
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment:
         raise RuntimeError("AZURE_OPENAI_DEPLOYMENT must be set")

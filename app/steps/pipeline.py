@@ -1,15 +1,3 @@
-"""
-Pipeline: orchestrates PR analysis (extraction + step generation) and video pipeline.
-
-Execution strategy:
-  - Default: **stepwise only** — `run_capture` (Agent Browser CLI by default, see
-    `app.steps.step_execution`). Screenshots → mp4.
-  - Optional script-first: set env `VIDEO_PIPELINE=script_first` to try the legacy
-    Playwright script path first (smooth continuous recording), then fall back to
-    stepwise on failure.
-
-Call analyze_pr() for steps + narration; call run_pipeline() for full capture → render → upload.
-"""
 from __future__ import annotations
 from app.steps.errors import ContractIntegrityError
 import os
@@ -45,12 +33,6 @@ async def analyze_pr(
     diff_files: Optional[List[Dict[str, str]]] = None,
     start_route: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Fetches PR diff, generates grounded steps and narration via LLM + DOM crawl.
-
-    Returns:
-        Dict with keys: steps, narration, llm_cost_usd; optionally budget_exceeded.
-    """
     try:
         print("\n[steps.pipeline] === ANALYZE PR (diff → steps) ===", flush=True)
         print(
@@ -142,16 +124,6 @@ def run_pipeline(
     generation_context: Optional[Dict[str, Any]] = None,
     upload: bool = True,
 ) -> tuple:
-    """
-    Video capture runner. By default (**VIDEO_PIPELINE** unset or `stepwise`) only
-    the stepwise path runs (Agent Browser unless `BROWSER_BACKEND=playwright`).
-
-    Set **VIDEO_PIPELINE=script_first** to attempt script-first first when
-    `suggested_demo_flow` is present, then fall back to stepwise.
-
-    Returns:
-        tuple: (video_url: str, capture_summary: dict)
-    """
     if not preview_url:
         raise ValueError("preview_url cannot be None or empty")
 
