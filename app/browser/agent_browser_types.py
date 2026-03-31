@@ -66,7 +66,7 @@ class SelectionResult(TypedDict):
 ValidationSource = Literal["step", "test_case", "legacy_state_change", ""]
 
 
-ValidationConditionType = Literal["url_match", "text_present", "element_present"]
+ValidationConditionType = Literal["url_match", "text_present", "element_present", "state_changed"]
 
 
 class ValidationCondition(TypedDict):

@@ -132,22 +132,19 @@ def preflight_gate(
                     f"contract requires '{terminal.value}'"
                 )
 
-        click_before_terminal = None
-        for step in reversed(steps):
-            if step.get("action") == "assert_terminal":
-                continue
-            if step.get("action") == "click":
-                click_before_terminal = step
-                break
-        if click_before_terminal is not None:
-            has_validation = bool(
-                click_before_terminal.get("validation_condition")
-                or click_before_terminal.get("success_condition")
-            )
-            if not has_validation:
-                errors.append(
-                    "Last click before assert_terminal is missing validation metadata"
-                )
+    for step in click_steps:
+        has_validation = bool(
+            step.get("validation_condition")
+            or step.get("success_condition")
+        )
+        if has_validation:
+            continue
+        step["validation_condition"] = {
+            "type": "state_changed",
+            "value": "true",
+        }
+        step.setdefault("success_condition", step["validation_condition"])
+        step["validation_source"] = "preflight_default"
 
 
 

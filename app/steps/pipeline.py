@@ -282,7 +282,7 @@ def run_pipeline(
                     f"steps_failed={capture_summary.get('steps_failed')} "
                     f"failure_reason={capture_summary.get('failure_reason')}."
                 )
-            render_video()
+            render_video(capture_summary.get("approved_frames") or [])
             video_path = SCREENSHOT_DIR / "out.mp4"
             pipeline_used = "stepwise"
             capture_summary["pipeline"] = "stepwise"

@@ -189,6 +189,7 @@ def validate_against_dom(
 
 
     valid_texts_lower = {t.lower() for t in valid_texts}
+    required_labels: Set[str] = set()
 
 
 
@@ -200,6 +201,8 @@ def validate_against_dom(
                 if lbl:
                     valid_texts.add(lbl)
                     valid_texts_lower.add(lbl.lower())
+                    if getattr(target, "required", True):
+                        required_labels.add(lbl.lower())
         except Exception:
             pass
 
@@ -276,19 +279,23 @@ def validate_against_dom(
                 }
 
             else:
-                annotated = {
-                    **step,
-                    "dom_confirmed": False,
-                    "match_confidence": "none",
-                    "dom_warning": f"Label '{label}' not found in crawled DOM",
-                }
-
+                is_contract_target = label_lower in required_labels
+                if is_contract_target:
+                    annotated = {
+                        **step,
+                        "dom_confirmed": False,
+                        "match_confidence": "none",
+                        "contract_missing": True,
+                        "dom_warning": f"Required contract target '{label}' not found in crawled DOM",
+                    }
+                    accepted.append(annotated)
+                    continue
                 print(
-                    f"[step-validator] unconfirmed click "
-                    f"label={label!r} selector={selector!r} "
-                    f"— keeping for pre-flight gate",
+                    f"[step-validator] dropping unconfirmed non-contract click "
+                    f"label={label!r} selector={selector!r}",
                     flush=True,
                 )
+                continue
 
             accepted.append(annotated)
             continue

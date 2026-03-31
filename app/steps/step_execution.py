@@ -52,7 +52,7 @@ def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
         return None
     cond_type = str(raw.get("type") or "").strip()
     cond_value = str(raw.get("value") or "").strip()
-    if cond_type not in {"url_match", "text_present", "element_present"}:
+    if cond_type not in {"url_match", "text_present", "element_present", "state_changed"}:
         return None
     if not cond_value:
         return None
@@ -179,6 +179,7 @@ def run_capture(
                 "steps_failed": int(_runner_result.get("steps_failed", 0)),
                 "failure_reason": None,
                 "success": True,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
         else:
@@ -187,6 +188,7 @@ def run_capture(
                 "steps_failed": 1,
                 "failure_reason": _runner_result.get("failure_reason") or "ab_execution_failed",
                 "success": False,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
 
@@ -213,6 +215,7 @@ def run_capture(
                 "steps_failed": int(_runner_result.get("steps_failed", 0)),
                 "failure_reason": None,
                 "success": True,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
         else:
@@ -221,6 +224,7 @@ def run_capture(
                 "steps_failed": 1,
                 "failure_reason": _runner_result.get("failure_reason") or "stepwise_execution_failed",
                 "success": False,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
 

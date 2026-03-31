@@ -1,6 +1,6 @@
 import subprocess
 from pathlib import Path
-import glob
+from typing import Iterable, List, Optional
 from observability import pipeline_step
 from app.config_types import load_capture_settings
 
@@ -13,18 +13,21 @@ FFMPEG_LOGLEVEL = "-loglevel", "error"
 
 
 @pipeline_step("render")
-def render_video():
+def render_video(approved_frames: Optional[Iterable[str | Path]] = None):
     output_path = SCREENSHOT_DIR / "out.mp4"
 
     cs = load_capture_settings()
     W = cs.viewport_width
     H = cs.viewport_height
 
-
-    shot_files = sorted(glob.glob(str(SCREENSHOT_DIR / "shot*.png")))
+    shot_files: List[str] = []
+    for frame in approved_frames or []:
+        path = Path(frame)
+        if path.exists():
+            shot_files.append(str(path))
 
     if not shot_files:
-        raise FileNotFoundError("No screenshot files found (shot*.png)")
+        raise FileNotFoundError("No approved screenshot frames provided for render")
 
     print(f"[render] screenshots={len(shot_files)} viewport={W}x{H}", flush=True)
 

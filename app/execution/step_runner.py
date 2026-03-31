@@ -123,7 +123,7 @@ def _normalize_validation_condition(raw: Any) -> Optional[ValidationCondition]:
         return None
     cond_type = str(raw.get("type") or "").strip()
     cond_value = str(raw.get("value") or "").strip()
-    if cond_type not in {"url_match", "text_present", "element_present"}:
+    if cond_type not in {"url_match", "text_present", "element_present", "state_changed"}:
         return None
     if not cond_value:
         return None
@@ -369,8 +369,9 @@ def _capture_ab_screenshot(
         attempt_screenshots.append(path)
         step_result[step_result_key] = str(path)
         return shot_idx + 1
-    except Exception:
-        return shot_idx
+    except Exception as exc:
+        step_result[f"{step_result_key}_error"] = f"screenshot_failed:{exc}"
+        raise
 
 
 def _run_ab_click_attempt(
@@ -474,14 +475,18 @@ def _run_ab_click_attempt(
         })
         return result
 
-    shot_idx = _capture_ab_screenshot(
-        cli,
-        screenshot_dir=screenshot_dir,
-        shot_idx=shot_idx,
-        step_result=step_result,
-        step_result_key="before_screenshot",
-        attempt_screenshots=attempt_screenshots,
-    )
+    try:
+        shot_idx = _capture_ab_screenshot(
+            cli,
+            screenshot_dir=screenshot_dir,
+            shot_idx=shot_idx,
+            step_result=step_result,
+            step_result_key="before_screenshot",
+            attempt_screenshots=attempt_screenshots,
+        )
+    except Exception as exc:
+        result["error"] = f"before_screenshot_failed:{exc}"
+        return result
     result["shot_idx"] = shot_idx
 
     try:
@@ -508,14 +513,18 @@ def _run_ab_click_attempt(
             },
         )
 
-    shot_idx = _capture_ab_screenshot(
-        cli,
-        screenshot_dir=screenshot_dir,
-        shot_idx=shot_idx,
-        step_result=step_result,
-        step_result_key="after_screenshot",
-        attempt_screenshots=attempt_screenshots,
-    )
+    try:
+        shot_idx = _capture_ab_screenshot(
+            cli,
+            screenshot_dir=screenshot_dir,
+            shot_idx=shot_idx,
+            step_result=step_result,
+            step_result_key="after_screenshot",
+            attempt_screenshots=attempt_screenshots,
+        )
+    except Exception as exc:
+        result["error"] = f"after_screenshot_failed:{exc}"
+        return result
     result["shot_idx"] = shot_idx
 
     snap_after = extract_snapshot(save_raw=False)
@@ -900,6 +909,8 @@ def _matches_validation_condition(
         return _contains_ci(snapshot_text, expected)
     if cond_type == "element_present":
         return any(_contains_ci(name, expected) for name in element_names)
+    if cond_type == "state_changed":
+        return False
     return False
 
 
@@ -925,6 +936,8 @@ def _describe_validation_actual(
         return str(snap_after.get("current_url") or "")
     if condition["type"] == "text_present":
         return str(snap_after.get("snapshot_text") or "")
+    if condition["type"] == "state_changed":
+        return "state_changed"
 
     matched_names = [
         name for name in _element_names(snap_after)
@@ -965,7 +978,13 @@ def _evaluate_click_validation(
         snapshot_text=str(snap_after.get("snapshot_text") or ""),
         element_names=_element_names(snap_after),
     )
-    passed = after_matches and not before_matches
+    if condition["type"] == "state_changed":
+        passed = (
+            str(snap_before.get("current_url") or "") != str(snap_after.get("current_url") or "")
+            or str(snap_before.get("snapshot_text") or "") != str(snap_after.get("snapshot_text") or "")
+        )
+    else:
+        passed = after_matches and not before_matches
     return StepValidationResult(
         passed=passed,
         condition=condition,
@@ -1001,11 +1020,35 @@ def _discard_screenshots(paths: List[Path]) -> None:
 
 def _step_screenshot_paths(step_result: Dict[str, Any]) -> List[Path]:
     paths: List[Path] = []
-    for key in ("before_screenshot", "after_screenshot"):
+    for key in ("screenshot_path", "before_screenshot", "after_screenshot"):
         raw = str(step_result.get(key) or "").strip()
         if raw:
             paths.append(Path(raw))
     return paths
+
+
+def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
+    approved: List[str] = []
+    seen: set[str] = set()
+    for result in results:
+        if str(result.get("status") or "") != "ok":
+            continue
+        outcome = str(result.get("outcome") or "")
+        step = result.get("step") or {}
+        action = str(step.get("action") or "")
+        keep = False
+        if action == "screenshot":
+            keep = outcome == "success"
+        elif action == "assert_terminal":
+            keep = bool(result.get("terminal_condition_reached"))
+        if not keep:
+            continue
+        for path in _step_screenshot_paths(result):
+            raw = str(path)
+            if raw and raw not in seen and Path(raw).exists():
+                seen.add(raw)
+                approved.append(raw)
+    return approved
 
 
 def _discard_step_screenshots(step_result: Dict[str, Any]) -> None:
@@ -1054,8 +1097,7 @@ def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool
         name = str(element.get("name") or "").strip().lower()
         if needle and needle in name:
             return True
-    snap_text = snapshot_text.lower()
-    return bool(needle and needle in snap_text)
+    return False
 
 
 def _assert_ab_terminal_condition(
@@ -1098,41 +1140,44 @@ def _assert_ab_terminal_condition(
     if cond_type == "element_present" and expected:
         testid_ref = cli.find_testid_ref(expected)
         if testid_ref:
-            result["source"] = "find_testid"
-            result["actual"] = testid_ref
-            return result
+            try:
+                if cli.is_visible(testid_ref):
+                    result["source"] = "find_testid_visible"
+                    result["actual"] = testid_ref
+                    return result
+            except Exception:
+                pass
 
         for selector in (f"[data-testid='{expected}']", f"#{expected}"):
-            count = cli.get_count(selector)
-            if count > 0:
-                result["source"] = "get_count"
-                result["actual"] = selector
-                return result
+            try:
+                semantic_ref = cli.find_element(selector)
+            except Exception:
+                semantic_ref = ""
+            if semantic_ref:
+                try:
+                    if cli.is_visible(semantic_ref):
+                        result["source"] = "find_element_visible"
+                        result["actual"] = semantic_ref
+                        return result
+                except Exception:
+                    pass
 
         semantic_ref = cli.find_ref(expected)
         if semantic_ref:
-            result["source"] = "semantic_find"
-            result["actual"] = semantic_ref
-            return result
+            try:
+                if cli.is_visible(semantic_ref):
+                    result["source"] = "semantic_find_visible"
+                    result["actual"] = semantic_ref
+                    return result
+            except Exception:
+                pass
 
     if expected:
-        print(
-            f"[terminal_check] browser-native check failed for "
-            f"type={cond_type or 'unknown'} value={cond_value or expected!r} "
-            f"— falling back to snapshot text search",
-            flush=True,
-        )
         terminal_snapshot = extract_snapshot(save_raw=False)
         found = _terminal_match_in_snapshot(terminal_snapshot, expected)
         result["found"] = found
-        result["source"] = "snapshot_fallback"
+        result["source"] = "snapshot_visible_elements"
         result["actual"] = expected if found else ""
-        if found:
-            print(
-                "[terminal_check] matched via snapshot text fallback — "
-                "consider adding explicit testid to this terminal condition",
-                flush=True,
-            )
         return result
 
     return result
@@ -1258,7 +1303,12 @@ def run_stepwise(
                 continue
 
             _step_latency_ms = int((time.monotonic() - _step_t0) * 1000)           
-            results.append({"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms})
+            step_result = {"index": i, "step": step, "status": "ok", "step_latency_ms": _step_latency_ms}
+            if str(step.get("action") or "") == "screenshot":
+                shot_path = screenshot_dir / f"shot{shot_idx - 1}.png"
+                step_result["screenshot_path"] = str(shot_path)
+                step_result["outcome"] = "success"
+            results.append(step_result)
 
             now = capture_state(page)
             nav_changed = detect_major_change(prev, now)
@@ -1288,6 +1338,7 @@ def run_stepwise(
         "steps_succeeded": len(results),
         "steps_failed": 0,
         "results": results,
+        "approved_frames": _approved_frame_paths(results),
         "metrics": _build_metrics(results, len(initial_steps), total_retries),
     }
 
@@ -1414,8 +1465,29 @@ def run_ab_stepwise(
                 try:
                     cli.screenshot(path)
                     shot_idx += 1
-                except AgentBrowserError:
-                    pass                                                           
+                    step_result["screenshot_path"] = str(path)
+                except AgentBrowserError as exc:
+                    step_result.update({
+                        "status": "failed",
+                        "outcome": "click_failed",
+                        "error": f"screenshot_failed:{exc}",
+                    })
+                    _attach_ab_failure_diagnostics(cli, step_result)
+                    step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
+                    results.append(step_result)
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason=f"screenshot_failed:{exc}",
+                        ),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 1,
+                        "failure_reason": f"screenshot_failed:{exc}",
+                        "results": results,
+                        "approved_frames": _approved_frame_paths(results),
+                        "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                    }
                 step_result.update({"status": "ok", "outcome": "success"})
                 steps_succeeded += 1
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
@@ -1484,6 +1556,38 @@ def run_ab_stepwise(
                 step_result["status"] = "ok" if found else "failed"
                 step_result["step_latency_ms"] = int((time.monotonic() - _step_t0) * 1000)
                 if found:
+                    terminal_frame_path = screenshot_dir / f"shot{shot_idx}.png"
+                    try:
+                        cli.screenshot(terminal_frame_path)
+                        step_result["screenshot_path"] = str(terminal_frame_path)
+                        print(
+                            f"[step_runner] terminal frame captured: {terminal_frame_path}",
+                            flush=True,
+                        )
+                        shot_idx += 1
+                    except AgentBrowserError as exc:
+                        step_result.update(
+                            {
+                                "status": "failed",
+                                "outcome": "click_failed",
+                                "error": f"terminal_screenshot_failed:{exc}",
+                            }
+                        )
+                        _attach_ab_failure_diagnostics(cli, step_result)
+                        results.append(step_result)
+                        return {
+                            "success": False,
+                            "final_outcome": _classify_final_outcome(
+                                success=False,
+                                failure_reason=f"terminal_screenshot_failed:{exc}",
+                            ),
+                            "steps_succeeded": steps_succeeded,
+                            "steps_failed": 1,
+                            "failure_reason": f"terminal_screenshot_failed:{exc}",
+                            "results": results,
+                            "approved_frames": _approved_frame_paths(results),
+                            "metrics": _build_metrics(results, len(initial_steps), _total_retries),
+                        }
                     steps_succeeded += 1
                 results.append(step_result)
                 if not found:
@@ -1858,6 +1962,13 @@ def run_ab_stepwise(
                                 "validated_milestones": len(replay_steps),
                                 "intent": str(step_result.get("intent") or ""),
                             })
+                            for existing_result in results:
+                                existing_result.pop("screenshot_path", None)
+                                existing_result["before_screenshot"] = ""
+                                existing_result["after_screenshot"] = ""
+                            for old in screenshot_dir.glob("shot*.png"):
+                                old.unlink()
+                            shot_idx = 1
                             try:
                                 cli.close()
                             except Exception:
@@ -1969,5 +2080,6 @@ def run_ab_stepwise(
         "steps_succeeded": steps_succeeded,
         "steps_failed": 0,
         "results": results,
+        "approved_frames": _approved_frame_paths(results),
         "metrics": _build_metrics(results, len(initial_steps), _total_retries),
     }

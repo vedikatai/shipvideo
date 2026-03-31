@@ -17,7 +17,7 @@ class TargetRef:
 @dataclass
 class TerminalCondition:
 
-    type: Literal["url_match", "text_present", "element_present"]
+    type: Literal["url_match", "text_present", "element_present", "state_changed"]
     value: str                                                   
 
 

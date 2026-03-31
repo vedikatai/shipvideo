@@ -524,7 +524,24 @@ def _validate_against_route_snapshots(
             accepted.append(step)
             continue
 
-        route_dom = route_snapshots.get(current_route) or dom_data
+        if current_route not in route_snapshots:
+            label = str(step.get("label") or step.get("text") or "").strip()
+            print(
+                f"[planning] no route snapshot for '{current_route}' "
+                f"— click '{label}' unverified by planning",
+                flush=True,
+            )
+            accepted.append(
+                {
+                    **step,
+                    "dom_confirmed": False,
+                    "match_confidence": "none",
+                    "dom_warning": f"Route '{current_route}' was not crawled",
+                }
+            )
+            continue
+
+        route_dom = route_snapshots[current_route]
         validated_clicks = validate_against_dom(
             [step],
             route_dom,

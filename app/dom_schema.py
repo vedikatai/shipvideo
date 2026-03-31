@@ -67,7 +67,7 @@ ExperimentMode = Literal["deterministic", "deterministic_plus_llm"]
 
 
 
-SuccessConditionType = Literal["url_match", "text_present", "element_present"]
+SuccessConditionType = Literal["url_match", "text_present", "element_present", "state_changed"]
 
 
 class SuccessCondition(TypedDict):
