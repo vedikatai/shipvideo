@@ -34,6 +34,7 @@ MAX_STEPS_PER_RUN: int = 10
 
 MAX_RETRIES_PER_STEP: int = 2
 MAX_AB_REPLANS_PER_RUN: int = 1
+MAX_AB_FLOW_RESTARTS: int = 1
 
 
 
@@ -703,6 +704,151 @@ def _recover_ab_prerequisite_steps(
     }
 
 
+def _validated_milestone_steps(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    milestones: List[Dict[str, Any]] = []
+    for result in results:
+        if str(result.get("status") or "") != "ok":
+            continue
+        if str(result.get("outcome") or "") != "success":
+            continue
+        step = result.get("step") or {}
+        action = str(step.get("action") or "")
+        if action in {"goto", "click"}:
+            milestones.append(dict(step))
+    return milestones
+
+
+def _replay_ab_milestones(
+    *,
+    cli: Any,
+    preview_url: str,
+    steps: List[Dict[str, Any]],
+    mode: str,
+    capture_settings: CaptureSettings,
+) -> Dict[str, Any]:
+    from app.browser.ref_selector import derive_intent
+    from app.context.dom_extractor import extract_ab_context
+
+    cli.open(preview_url)
+    _configure_ab_session(cli, capture_settings)
+    _settle_ab_page(cli)
+
+    for idx, step in enumerate(steps):
+        action = str(step.get("action") or "")
+        if action == "goto":
+            url = step.get("url") or "/"
+            cli.open(_resolve_url(preview_url, url))
+            _settle_ab_page(cli)
+            continue
+        if action != "click":
+            continue
+
+        intent = derive_intent(step)
+        if not intent:
+            return {"success": False, "error": "replay_missing_intent", "index": idx}
+
+        snap_before = extract_ab_context(cli, save_raw=False)
+        resolution = _resolve_ab_click_target(
+            cli,
+            intent=intent,
+            snapshot=snap_before,
+            mode=mode,
+            allow_scroll_retry=True,
+            selector=str(step.get("selector") or ""),
+        )
+        click_target = str(resolution.get("chosen_ref") or "")
+        if not click_target:
+            return {
+                "success": False,
+                "error": f"replay_selection_failed:{resolution.get('selection_reason', 'no_match')}",
+                "index": idx,
+                "intent": intent,
+            }
+
+        cli.click(click_target)
+        _settle_ab_page(
+            cli,
+            validation_condition=_extract_validation_condition(step),
+        )
+        snap_after = extract_ab_context(cli, save_raw=False)
+        validation = _evaluate_click_validation(
+            step=step,
+            snap_before=snap_before,
+            snap_after=snap_after,
+        )
+        if not validation["passed"]:
+            inferred = _infer_runtime_validation(
+                steps=steps,
+                step_index=idx,
+                snap_before=snap_before,
+                snap_after=snap_after,
+                mode=mode,
+            )
+            if not inferred["passed"]:
+                return {
+                    "success": False,
+                    "error": validation["failure_reason"] or inferred["failure_reason"],
+                    "index": idx,
+                    "intent": intent,
+                }
+
+    return {"success": True}
+
+
+def _infer_runtime_validation(
+    *,
+    steps: List[Dict[str, Any]],
+    step_index: int,
+    snap_before: Dict[str, Any],
+    snap_after: Dict[str, Any],
+    mode: str,
+) -> StepValidationResult:
+    next_intent = _next_click_intent(steps, step_index)
+    if next_intent:
+        before_has = _snapshot_has_intent(
+            snap_before,
+            intent=next_intent,
+            mode=mode,
+        )
+        after_has = _snapshot_has_intent(
+            snap_after,
+            intent=next_intent,
+            mode=mode,
+        )
+        if after_has and not before_has:
+            condition: ValidationCondition = {
+                "type": "element_present",
+                "value": next_intent,
+            }
+            return StepValidationResult(
+                passed=True,
+                condition=condition,
+                actual=next_intent,
+                source="runtime_inferred",
+                failure_reason="",
+            )
+
+    url_before = str(snap_before.get("current_url") or "")
+    url_after = str(snap_after.get("current_url") or "")
+    if url_before and url_after and url_before != url_after:
+        condition = {"type": "url_match", "value": url_after}
+        return StepValidationResult(
+            passed=True,
+            condition=condition,
+            actual=url_after,
+            source="runtime_inferred",
+            failure_reason="",
+        )
+
+    return StepValidationResult(
+        passed=False,
+        condition=None,
+        actual="no_runtime_validation_signal",
+        source="runtime_inferred",
+        failure_reason="validation_failed:no_runtime_validation_signal",
+    )
+
+
 def _collect_ab_failure_diagnostics(cli: Any) -> Dict[str, Any]:
     console_messages = cli.console_messages()
     page_errors = cli.page_errors()
@@ -1194,6 +1340,7 @@ def run_ab_stepwise(
     last_action_key: Optional[str] = None
     _total_retries = 0                                                             
     _replans_used = 0
+    _flow_restarts_used = 0
 
     _log("ab_runner.start", {
         "preview_url": preview_url,
@@ -1553,6 +1700,25 @@ def run_ab_stepwise(
                     state_changed = bool(attempt_result["state_changed"])
                     validation = attempt_result["validation"]
                     condition = validation["condition"] if validation else None
+                    if condition is None:
+                        inferred_validation = _infer_runtime_validation(
+                            steps=queue,
+                            step_index=step_idx,
+                            snap_before=attempt_result["snap_before"] or {},
+                            snap_after=snap_after or {},
+                            mode=mode,
+                        )
+                        if inferred_validation["passed"]:
+                            validation = inferred_validation
+                            condition = inferred_validation["condition"]
+                            step_result.update({
+                                "validation_result": inferred_validation,
+                                "validation_type": condition["type"] if condition else "",
+                                "validation_value": condition["value"] if condition else "",
+                                "validation_source": inferred_validation["source"],
+                                "validation_passed": True,
+                                "validation_actual": inferred_validation["actual"],
+                            })
 
                     if (
                         not state_changed
@@ -1597,12 +1763,51 @@ def run_ab_stepwise(
                             break
 
                     if condition is None:
-                        outcome = str(attempt_result["outcome"])
-                        last_action_key = action_key
+                        if _replans_used < MAX_AB_REPLANS_PER_RUN:
+                            recovery = _recover_ab_prerequisite_steps(
+                                objective=objective,
+                                steps=queue,
+                                step_index=step_idx,
+                                current_step=step,
+                                current_intent=intent,
+                                snap_after=snap_after,
+                                mode=mode,
+                                trigger_reason="unvalidated_click",
+                                current_step_completed_unvalidated=False,
+                                state_changed=state_changed,
+                            )
+                            _total_retries += int(recovery.get("attempts_used", 0))
+                            if recovery.get("recovered"):
+                                _replans_used += 1
+                                _discard_screenshots(attempt_screenshots)
+                                step_result["runtime_recovery"] = {
+                                    "triggered": True,
+                                    "trigger_reason": "unvalidated_click",
+                                    "blocked_intent": recovery.get("blocked_intent", ""),
+                                    "next_intent": recovery.get("next_intent", ""),
+                                }
+                                queue[step_idx:step_idx + 1] = list(
+                                    recovery.get("replacement_steps") or []
+                                )
+                                runtime_recovered = True
+                                _log("ab_runner.prerequisite_recovered", {
+                                    "index": step_idx,
+                                    "attempt": attempt,
+                                    "intent": intent,
+                                    "trigger_reason": "unvalidated_click",
+                                    "next_intent": recovery.get("next_intent", ""),
+                                })
+                                break
+                        outcome = "wrong_click"
+                        step_result["validation_failure_reason"] = (
+                            "validation_failed:no_runtime_validation_signal"
+                        )
+                        _discard_screenshots(attempt_screenshots)
                         _log("ab_runner.unvalidated", {
                             "index": step_idx,
                             "attempt": attempt,
                             "ref": click_target,
+                            "state_changed": state_changed,
                         })
                         break
 
@@ -1643,6 +1848,48 @@ def run_ab_stepwise(
                     "wrong_click",
                 })
                 if outcome in _FATAL_OUTCOMES:
+                    if outcome == "wrong_click" and _flow_restarts_used < MAX_AB_FLOW_RESTARTS:
+                        replay_steps = _validated_milestone_steps(results)
+                        if replay_steps:
+                            _flow_restarts_used += 1
+                            _log("ab_runner.flow_restart", {
+                                "index": step_idx,
+                                "restart_number": _flow_restarts_used,
+                                "validated_milestones": len(replay_steps),
+                                "intent": str(step_result.get("intent") or ""),
+                            })
+                            try:
+                                cli.close()
+                            except Exception:
+                                pass
+                            cli = AgentBrowserCLI(session=session)
+                            try:
+                                replay = _replay_ab_milestones(
+                                    cli=cli,
+                                    preview_url=preview_url,
+                                    steps=replay_steps,
+                                    mode=mode,
+                                    capture_settings=cs,
+                                )
+                            except AgentBrowserError as exc:
+                                replay = {
+                                    "success": False,
+                                    "error": f"restart_failed:{exc}",
+                                }
+                            if replay.get("success"):
+                                last_action_key = None
+                                step_result["restart_recovery"] = {
+                                    "triggered": True,
+                                    "restart_number": _flow_restarts_used,
+                                    "replayed_steps": len(replay_steps),
+                                }
+                                continue
+                            step_result["restart_recovery"] = {
+                                "triggered": True,
+                                "restart_number": _flow_restarts_used,
+                                "replayed_steps": len(replay_steps),
+                                "error": replay.get("error", "replay_failed"),
+                            }
                     step_result["status"] = "failed"
                     if not _should_keep_click_screenshots(step_result):
                         _discard_step_screenshots(step_result)

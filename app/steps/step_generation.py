@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import fnmatch
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.steps.dom_crawler import crawl_dom_data
@@ -24,6 +25,7 @@ from app.steps.step_normalizer import (
 )
 from app.steps.diff_budget import budget_diff_files
 from app.config import load_config
+from app.steps.demo_contract import TargetRef
 from observability import pipeline_step
 
 try:
@@ -348,6 +350,253 @@ def _fallback_narration(pr_title: Optional[str]) -> str:
     return "Demo screenshot for this pull request."
 
 
+def _label_to_selector(label: str) -> str:
+    normalized = "-".join(label.strip().lower().split())
+    return f"[data-testid='{normalized}']" if normalized else ""
+
+
+def _upgrade_contract_from_extraction(
+    contract: Optional[Any],
+    extraction: Dict[str, Any],
+) -> Optional[Any]:
+    if contract is None:
+        return None
+
+    labels = []
+    for raw_label in extraction.get("click_labels") or []:
+        label = str(raw_label or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+
+    if not labels:
+        return contract
+
+    existing_targets = list(getattr(contract, "targets", []) or [])
+    existing_keys = {
+        (getattr(target, "label", "") or "").strip().casefold()
+        for target in existing_targets
+        if (getattr(target, "label", "") or "").strip()
+    }
+
+    augmented_targets = list(existing_targets)
+    for label in labels:
+        key = label.casefold()
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        augmented_targets.append(
+            TargetRef(label=label, selector=_label_to_selector(label))
+        )
+
+    confidence = getattr(contract, "confidence", "low")
+    if labels and confidence == "low":
+        confidence = "medium"
+
+    extraction_notes = list(getattr(contract, "extraction_notes", []) or [])
+    extraction_notes.append("contract_targets_upgraded_from_extraction")
+
+    return replace(
+        contract,
+        targets=augmented_targets,
+        confidence=confidence,
+        extraction_notes=extraction_notes,
+    )
+
+
+def _log_click_stage(stage: str, steps: List[Dict[str, Any]]) -> None:
+    click_steps = [step for step in steps if isinstance(step, dict) and step.get("action") == "click"]
+    payload = [
+        {
+            "label": step.get("label", ""),
+            "selector": step.get("selector", ""),
+            "text": step.get("text", ""),
+            "dom_confirmed": step.get("dom_confirmed"),
+            "match_confidence": step.get("match_confidence"),
+        }
+        for step in click_steps
+    ]
+    print(
+        f"[steps.step_generation] {stage}: click_count={len(click_steps)} clicks={payload}",
+        flush=True,
+    )
+
+
+def _route_snapshot_catalog(
+    dom_data: Dict[str, Any],
+    *,
+    fallback_routes: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    snapshots = dom_data.get("route_snapshots") or {}
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for route in fallback_routes:
+        route_dom = snapshots.get(route) or {}
+        buttons = route_dom.get("buttons") or []
+        links = route_dom.get("links") or []
+        data_testids = route_dom.get("data_testids") or []
+        catalog[route] = {
+            "buttons": [
+                {
+                    "text": (btn.get("text") or "").strip(),
+                    "selector": (btn.get("selector") or "").strip(),
+                    "testid": (btn.get("testid") or "").strip(),
+                    "aria": (btn.get("aria") or "").strip(),
+                }
+                for btn in buttons
+                if (btn.get("text") or btn.get("selector") or "").strip()
+            ][:20],
+            "links": [
+                {
+                    "text": (link.get("text") or "").strip(),
+                    "href": (link.get("href") or "").strip(),
+                }
+                for link in links
+                if (link.get("text") or "").strip()
+            ][:20],
+            "data_testids": [
+                (item.get("testid") or "").strip()
+                for item in data_testids
+                if (item.get("testid") or "").strip()
+            ][:20],
+        }
+    return catalog
+
+
+def _find_link_target_for_click(
+    step: Dict[str, Any],
+    route_dom: Dict[str, Any],
+) -> str:
+    label = (step.get("label") or step.get("text") or "").strip().lower()
+    selector = (step.get("selector") or "").strip()
+    selector_testid = ""
+    if selector.startswith("[data-testid='") and selector.endswith("']"):
+        selector_testid = selector[len("[data-testid='"):-2].strip().lower()
+    selector_aria = ""
+    if selector.startswith("[aria-label='") and selector.endswith("']"):
+        selector_aria = selector[len("[aria-label='"):-2].strip().lower()
+
+    for link in route_dom.get("links") or []:
+        href = (link.get("href") or "").strip()
+        if not href.startswith("/"):
+            continue
+        link_text = (link.get("text") or "").strip().lower()
+        link_testid = (link.get("testid") or "").strip().lower()
+        link_aria = (link.get("aria") or "").strip().lower()
+        if label and link_text and label == link_text:
+            return href
+        if selector_testid and link_testid and selector_testid == link_testid:
+            return href
+        if selector_aria and link_aria and selector_aria == link_aria:
+            return href
+    return ""
+
+
+def _validate_against_route_snapshots(
+    steps: List[Dict[str, Any]],
+    dom_data: Dict[str, Any],
+    diff_files: Optional[List[Dict[str, str]]],
+    *,
+    start_route: str,
+    allowed_routes_override: Optional[set] = None,
+    contract: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    route_snapshots = dom_data.get("route_snapshots") or {}
+    accepted: List[Dict[str, Any]] = []
+    current_route = start_route or "/"
+
+    for step in steps:
+        action = step.get("action")
+        if action == "goto":
+            accepted.extend(
+                validate_against_dom(
+                    [step],
+                    dom_data,
+                    diff_files,
+                    allowed_routes_override=allowed_routes_override,
+                    contract=contract,
+                )
+            )
+            goto_url = (step.get("url") or "").strip()
+            if goto_url:
+                current_route = goto_url
+            continue
+
+        if action != "click":
+            accepted.append(step)
+            continue
+
+        route_dom = route_snapshots.get(current_route) or dom_data
+        validated_clicks = validate_against_dom(
+            [step],
+            route_dom,
+            diff_files,
+            allowed_routes_override=allowed_routes_override,
+            contract=contract,
+        )
+        if not validated_clicks:
+            continue
+
+        validated_click = validated_clicks[0]
+        next_route = _find_link_target_for_click(validated_click, route_dom)
+        if next_route:
+            validated_click = {**validated_click, "expected_url": next_route}
+            current_route = next_route
+        accepted.append(validated_click)
+
+    return accepted
+
+
+def _synthesize_click_steps(
+    extraction: Dict[str, Any],
+    contract: Optional[Any],
+    start_route: Optional[str],
+) -> List[Dict[str, Any]]:
+    steps: List[Dict[str, Any]] = []
+    route = (start_route or extraction.get("start_route") or "").strip()
+    if route and route != "/":
+        steps.append(
+            {
+                "action": "goto",
+                "url": route,
+                "selector": "",
+                "text": "",
+                "label": "",
+                "expected_element": "",
+            }
+        )
+
+    for raw_label in extraction.get("click_labels") or []:
+        label = str(raw_label or "").strip()
+        if not label:
+            continue
+        steps.append(
+            {
+                "action": "click",
+                "url": "",
+                "selector": "",
+                "text": "",
+                "label": label,
+                "expected_element": "",
+            }
+        )
+
+    steps = _inject_terminal_assertion(steps, contract)
+    steps = _inject_click_validation_from_terminal(steps, contract)
+
+    if not any(step.get("action") == "screenshot" for step in steps):
+        steps.append(
+            {
+                "action": "screenshot",
+                "url": "",
+                "selector": "",
+                "text": "",
+                "label": "",
+                "expected_element": "",
+            }
+        )
+
+    return steps
+
+
 def _ensure_screenshots_for_visited_pages(
     steps: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -454,12 +703,66 @@ def _inject_click_validation_from_terminal(
     return updated
 
 
+def _inject_sequential_click_validations(
+    steps: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    updated = [dict(step) for step in steps]
+    click_indexes = [
+        idx for idx, step in enumerate(updated)
+        if step.get("action") == "click"
+    ]
+    if not click_indexes:
+        return updated
+
+    for offset, click_idx in enumerate(click_indexes):
+        click_step = dict(updated[click_idx])
+        if click_step.get("validation_condition") or click_step.get("success_condition"):
+            updated[click_idx] = click_step
+            continue
+
+        expected_url = str(click_step.get("expected_url") or "").strip()
+        if expected_url:
+            condition = {"type": "url_match", "value": expected_url}
+            click_step["validation_condition"] = condition
+            click_step.setdefault("success_condition", condition)
+            click_step.setdefault("validation_source", "planner_sequence")
+            updated[click_idx] = click_step
+            continue
+
+        next_label = ""
+        for next_idx in click_indexes[offset + 1:]:
+            candidate = str(updated[next_idx].get("label") or "").strip()
+            if candidate:
+                next_label = candidate
+                break
+
+        if next_label:
+            condition = {"type": "element_present", "value": next_label}
+            click_step["validation_condition"] = condition
+            click_step.setdefault("success_condition", condition)
+            click_step.setdefault("validation_source", "planner_sequence")
+            updated[click_idx] = click_step
+            continue
+
+        for later_step in updated[click_idx + 1:]:
+            if later_step.get("action") != "assert_terminal":
+                continue
+            condition = later_step.get("condition")
+            if isinstance(condition, dict) and condition.get("type") and condition.get("value"):
+                click_step["validation_condition"] = dict(condition)
+                click_step.setdefault("success_condition", dict(condition))
+                click_step.setdefault("validation_source", "planner_sequence")
+                updated[click_idx] = click_step
+            break
+
+    return updated
+
+
 def _build_planning_prompt(
     pr_title: Optional[str],
     extraction: Dict[str, Any],
     real_routes: List[str],
-    real_buttons: List[Any],
-    real_links: List[Any],
+    route_catalog: Dict[str, Dict[str, Any]],
     real_inputs: List[Any],
     real_data_testids: List[Any],
     diff_text: str,
@@ -531,7 +834,9 @@ def _build_planning_prompt(
         "• Do not stop until TERMINAL CONDITION is reachable.\n"
         "• Last meaningful step must be assert_terminal with the terminal condition.\n"
         "• Use ONLY routes from real_routes for goto.\n"
-        "• For click steps use exact visible label from real_buttons/real_links.\n"
+        "• Plan route-by-route. A click is valid only if it exists on the CURRENT route in route_catalog.\n"
+        "• After a goto, the CURRENT route becomes that url. If you click a link, assume navigation only when that link is listed for the CURRENT route.\n"
+        "• For click steps use exact visible label from the CURRENT route's buttons/links.\n"
         "• Put visible targets in `label`, not `selector` or `text`.\n"
         "• Use `selector` only for [data-testid='x'] or [aria-label='x'] targets.\n"
         "• Never use raw CSS selectors like #id or .class.\n"
@@ -545,8 +850,7 @@ def _build_planning_prompt(
         {
             "title": pr_title,
             "real_routes": real_routes,
-            "real_buttons": real_buttons,
-            "real_links": real_links,
+            "route_catalog": route_catalog,
             "real_inputs": real_inputs,
             "data_testids": real_data_testids,
 
@@ -653,8 +957,6 @@ async def generate_steps_from_diff(
         if allowed_routes_override:
             real_routes = list(allowed_routes_override | {"/"})
 
-        real_buttons = dom_data.get("buttons") or []
-        real_links = dom_data.get("links") or []
         real_inputs = dom_data.get("inputs") or []
         real_data_testids = dom_data.get("data_testids") or []
 
@@ -699,11 +1001,26 @@ async def generate_steps_from_diff(
         )
         total_cost += extraction_cost
 
+        contract = _upgrade_contract_from_extraction(contract, extraction)
+
+        if contract is not None:
+            print(
+                f"[steps.step_generation] contract_after_extraction: "
+                f"confidence={getattr(contract, 'confidence', 'low')} "
+                f"targets={[getattr(target, 'label', '') for target in (getattr(contract, 'targets', []) or [])]}",
+                flush=True,
+            )
 
         if not start_route and extraction.get("start_route"):
             start_route = extraction["start_route"].strip()
             if start_route and start_route != "/":
                 allowed_routes_override = {start_route}
+
+        planning_routes = list(dict.fromkeys(([start_route] if start_route else []) + list(real_routes)))
+        route_catalog = _route_snapshot_catalog(
+            dom_data,
+            fallback_routes=planning_routes,
+        )
 
 
 
@@ -715,8 +1032,7 @@ async def generate_steps_from_diff(
                 pr_title=pr_title,
                 extraction=extraction,
                 real_routes=real_routes,
-                real_buttons=real_buttons,
-                real_links=real_links,
+                route_catalog=route_catalog,
                 real_inputs=real_inputs,
                 real_data_testids=real_data_testids,
                 diff_text=diff_text,
@@ -745,6 +1061,7 @@ async def generate_steps_from_diff(
                 total_cost += round(estimate_run_cost(pt, ct), 4)
 
             steps = data.get("steps") or FALLBACK_STEPS
+            _log_click_stage("raw_llm_steps", steps)
 
 
             if not any(
@@ -772,15 +1089,18 @@ async def generate_steps_from_diff(
             steps = _inject_terminal_assertion(steps, contract)
 
             steps = _inject_click_validation_from_terminal(steps, contract)
+            steps = _inject_sequential_click_validations(steps)
 
 
-            dom_grounded = validate_against_dom(
+            dom_grounded = _validate_against_route_snapshots(
                 steps,
                 dom_data,
                 diff_files,
+                start_route=start_route or "/",
                 allowed_routes_override=allowed_routes_override,
                 contract=contract,
             )
+            _log_click_stage("after_dom_grounding", dom_grounded)
 
             validated = validate_steps(dom_grounded)
             if not validated:
@@ -789,6 +1109,7 @@ async def generate_steps_from_diff(
             normalized = normalize_steps(validated)
             if not normalized:
                 normalized = FALLBACK_STEPS
+            _log_click_stage("after_normalization", normalized)
 
             normalized = _ensure_screenshots_for_visited_pages(normalized)
 
@@ -852,6 +1173,35 @@ async def generate_steps_from_diff(
                 flush=True,
             )
             if any(err.startswith("Degenerate plan: zero click steps") for err in preflight.errors):
+                if extraction.get("click_labels"):
+                    print(
+                        "[steps.step_generation] zero-click plan detected; "
+                        "synthesizing click steps from extraction labels",
+                        flush=True,
+                    )
+                    synthesized = _synthesize_click_steps(extraction, contract, start_route)
+                    synthesized = _inject_sequential_click_validations(synthesized)
+                    _log_click_stage("synthesized_steps", synthesized)
+                    dom_grounded = _validate_against_route_snapshots(
+                        synthesized,
+                        dom_data,
+                        diff_files,
+                        start_route=start_route or "/",
+                        allowed_routes_override=allowed_routes_override,
+                        contract=contract,
+                    )
+                    _log_click_stage("synthesized_after_dom_grounding", dom_grounded)
+                    normalized = normalize_steps(validate_steps(dom_grounded))
+                    _log_click_stage("synthesized_after_normalization", normalized)
+                    normalized = _ensure_screenshots_for_visited_pages(normalized)
+                    preflight = preflight_gate(normalized, contract)
+                    if preflight.passed:
+                        print(
+                            f"[steps.step_generation] synthesized preflight passed "
+                            f"attempt={attempt + 1}",
+                            flush=True,
+                        )
+                        break
                 preflight_errors = [
                     "Degenerate plan: zero click steps after normalization. "
                     "Regenerate a real demo flow with explicit click steps that reach the required target and terminal condition.",
@@ -893,8 +1243,7 @@ async def generate_steps_from_diff(
                 "dom_data": dom_data,
                 "diffs_for_prompt": diffs_for_prompt,
                 "real_routes": real_routes,
-                "real_buttons": real_buttons,
-                "real_links": real_links,
+                "route_catalog": route_catalog,
                 "real_inputs": real_inputs,
                 "data_testids": real_data_testids,
                 "start_route": start_route,

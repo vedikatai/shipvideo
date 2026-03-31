@@ -14,6 +14,24 @@ except Exception:
     BadRequestError = Exception                
 
 
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "__dict__"):
+        data = {
+            key: _json_safe(val)
+            for key, val in vars(value).items()
+            if not key.startswith("_")
+        }
+        data["_type"] = value.__class__.__name__
+        return data
+    return str(value)
+
+
 def _get_client() -> Any:
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -159,7 +177,7 @@ def generate_next_steps(
     }
     messages = [
         {"role": "system", "content": system_msg},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps(_json_safe(payload), ensure_ascii=False)},
     ]
     client = _get_client()
     completion, data = _call_with_fallback(client, deployment, messages, 700, schema)
@@ -260,4 +278,3 @@ def find_ref_with_llm_sync(
     except RuntimeError:
 
         return ""
-

@@ -59,22 +59,25 @@ def _extract_targets(diff_files: List[Dict[str, str]]) -> List[TargetRef]:
             if not line.startswith("+"):
                 continue
 
+            normalized_line = line[1:]
+
             for m in re.finditer(r'data-testid=["\']([^"\']+)["\']', line):
                 tid = m.group(1)
                 label = tid.replace("-", " ").replace("_", " ")
-                if label not in seen_labels:
-                    seen_labels.add(label)
-                    targets.append(TargetRef(
-                        label=label,
-                        selector=f"[data-testid='{tid}']",
-                    ))
+                _append_target(
+                    targets,
+                    seen_labels,
+                    label=label,
+                    selector=f"[data-testid='{tid}']",
+                )
+
+            for label in _extract_string_targets_from_line(normalized_line):
+                _append_target(targets, seen_labels, label=label)
+
             if not _line_looks_interactive(line):
                 continue
-            for m in re.finditer(r'>\s*([A-Z][A-Za-z\s]{2,30})\s*</', line):
-                label = m.group(1).strip()
-                if label not in seen_labels and len(label.split()) <= 5:
-                    seen_labels.add(label)
-                    targets.append(TargetRef(label=label))
+            for label in _extract_interactive_targets_from_line(normalized_line):
+                _append_target(targets, seen_labels, label=label)
 
     return targets
 
@@ -159,3 +162,59 @@ def _line_looks_interactive(line: str) -> bool:
         or re.search(r'role=["\'](button|link|tab|menuitem)["\']', line, re.IGNORECASE)
         or re.search(r"<\s*[A-Za-z0-9_.:-]*(Button|Link|Tab|Checkbox|Radio)\b", line)
     )
+
+
+def _append_target(
+    targets: List[TargetRef],
+    seen_labels: Set[str],
+    *,
+    label: str,
+    selector: str = "",
+) -> None:
+    cleaned = _clean_target_label(label)
+    if not cleaned:
+        return
+    key = cleaned.casefold()
+    if key in seen_labels:
+        return
+    seen_labels.add(key)
+    targets.append(TargetRef(label=cleaned, selector=selector))
+
+
+def _clean_target_label(label: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (label or "").strip())
+    cleaned = cleaned.strip("(){}[]:,.;")
+    if len(cleaned) < 3 or len(cleaned.split()) > 6:
+        return ""
+    if not re.search(r"[A-Za-z]", cleaned):
+        return ""
+    lowered = cleaned.casefold()
+    if lowered in {
+        "true", "false", "null", "undefined", "button", "link",
+        "div", "span", "label", "variant", "size", "type",
+    }:
+        return ""
+    return cleaned
+
+
+def _extract_interactive_targets_from_line(line: str) -> List[str]:
+    labels: List[str] = []
+    for m in re.finditer(r'>\s*([^<{][^<>{}]{1,60}?)\s*<', line):
+        cleaned = _clean_target_label(m.group(1))
+        if cleaned:
+            labels.append(cleaned)
+    return labels
+
+
+def _extract_string_targets_from_line(line: str) -> List[str]:
+    labels: List[str] = []
+    patterns = (
+        r'(?:label|title|text|children|ctaLabel|buttonLabel|linkLabel|aria-label)\s*[:=]\s*["\']([^"\']{3,60})["\']',
+        r'["\']([^"\']{3,60})["\']\s*:\s*(?:true|false|null|undefined|[A-Za-z_][A-Za-z0-9_]*)',
+    )
+    for pattern in patterns:
+        for m in re.finditer(pattern, line, re.IGNORECASE):
+            cleaned = _clean_target_label(m.group(1))
+            if cleaned:
+                labels.append(cleaned)
+    return labels
