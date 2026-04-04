@@ -26,8 +26,11 @@ def extract_contract_static(
     for confidence, hint in interaction_hints:
         notes.append(f"interaction_hint_{confidence}:{hint}")
 
-    confidence = "high" if (start_route != "/" and targets and terminal) else (
-        "medium" if (targets or terminal) else "low"
+    has_route = bool(start_route and start_route != "/")
+    has_targets = bool(targets)
+    has_terminal = terminal is not None
+    confidence = "high" if (has_route and has_targets and has_terminal) else (
+        "medium" if ((has_route and has_targets) or (has_targets and has_terminal)) else "low"
     )
 
     return DemoContract(

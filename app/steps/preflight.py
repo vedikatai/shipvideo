@@ -137,14 +137,11 @@ def preflight_gate(
             step.get("validation_condition")
             or step.get("success_condition")
         )
-        if has_validation:
-            continue
-        step["validation_condition"] = {
-            "type": "state_changed",
-            "value": "true",
-        }
-        step.setdefault("success_condition", step["validation_condition"])
-        step["validation_source"] = "preflight_default"
+        if not has_validation:
+            errors.append(
+                "Click step missing explicit proof condition. "
+                "Every click must declare url_match, text_present, or element_present."
+            )
 
 
 

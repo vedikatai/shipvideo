@@ -20,7 +20,7 @@ from app.config_types import CaptureSettings
 from app.context.dom_extractor import extract_dom_context
 from app.dom_schema import ExperimentMode
 from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
-from app.llm.retry_engine import regenerate_with_feedback
+from app.llm.retry_engine import regenerate_with_feedback, regenerate_single_step_toward_testid
 from app.policy.selector_validator import validate_step_against_dom
 from observability import record_agent_browser_diagnostics
 
@@ -44,6 +44,7 @@ AB_VALIDATION_WAIT_TIMEOUT_S: int = 8
 AB_SCROLL_RETRY_COUNT: int = 3
 AB_SCROLL_RETRY_PX: int = 400
 AB_SCROLL_SETTLE_TIMEOUT_S: int = 1
+MAX_TESTID_SEARCH_ACTIONS: int = 8
 
 
 def _log(event: str, payload: Dict[str, Any]) -> None:
@@ -123,7 +124,7 @@ def _normalize_validation_condition(raw: Any) -> Optional[ValidationCondition]:
         return None
     cond_type = str(raw.get("type") or "").strip()
     cond_value = str(raw.get("value") or "").strip()
-    if cond_type not in {"url_match", "text_present", "element_present", "state_changed"}:
+    if cond_type not in {"url_match", "text_present", "element_present"}:
         return None
     if not cond_value:
         return None
@@ -261,6 +262,41 @@ def _scroll_to_find(
     return ""
 
 
+def _snapshot_element_by_ref(snapshot: Dict[str, Any], ref: str) -> Dict[str, Any]:
+    for element in snapshot.get("interactive_elements") or []:
+        if not isinstance(element, dict):
+            continue
+        if str(element.get("ref") or "").strip() == ref:
+            return element
+    return {}
+
+
+def _passes_preclick_safety_check(
+    *,
+    step: Dict[str, Any],
+    snapshot: Dict[str, Any],
+    chosen_ref: str,
+) -> tuple[bool, str]:
+    element = _snapshot_element_by_ref(snapshot, chosen_ref)
+    if not element:
+        return False, "chosen_ref_missing_from_snapshot"
+
+    preferred_surface = str(step.get("preferred_surface") or "").strip().lower()
+    element_surface = str(element.get("surface") or "").strip().lower()
+    if preferred_surface and element_surface and preferred_surface != element_surface:
+        return False, f"surface_mismatch:{preferred_surface}:{element_surface}"
+
+    selector = str(step.get("selector") or "").strip()
+    testid_match = re.search(r"""\[data-testid=['"]([^'"]+)['"]\]""", selector)
+    if testid_match:
+        expected_testid = str(testid_match.group(1) or "").strip().lower()
+        actual_testid = str(element.get("testid") or "").strip().lower()
+        if expected_testid and actual_testid and expected_testid != actual_testid:
+            return False, f"testid_mismatch:{expected_testid}:{actual_testid}"
+
+    return True, "ok"
+
+
 def _resolve_ab_click_target(
     cli: Any,
     *,
@@ -269,6 +305,9 @@ def _resolve_ab_click_target(
     mode: str,
     allow_scroll_retry: bool,
     selector: str = "",
+    preferred_testids: Optional[List[str]] = None,
+    preferred_surface: str = "",
+    preferred_texts: Optional[List[str]] = None,
 ) -> ABTargetResolution:
     from app.browser.ref_selector import select_ref
 
@@ -303,7 +342,14 @@ def _resolve_ab_click_target(
                 })
                 return resolved
 
-    sel = select_ref(intent, snapshot, mode=mode)                          
+    sel = select_ref(
+        intent,
+        snapshot,
+        mode=mode,
+        preferred_testids=preferred_testids,
+        preferred_surface=preferred_surface,
+        preferred_texts=preferred_texts,
+    )
     resolved.update({
         "chosen_ref": sel["chosen_ref"],
         "selection_reason": sel["selection_reason"],
@@ -426,6 +472,9 @@ def _run_ab_click_attempt(
         mode=mode,
         allow_scroll_retry=(attempt < click_attempt_limit),
         selector=str(step.get("selector") or ""),
+        preferred_testids=list(step.get("preferred_testids") or []),
+        preferred_surface=str(step.get("preferred_surface") or ""),
+        preferred_texts=list(step.get("preferred_texts") or []),
     )
     step_result.update({
         "chosen_ref": resolution["chosen_ref"],
@@ -457,6 +506,28 @@ def _run_ab_click_attempt(
     click_target = resolution["chosen_ref"]
     result["click_target"] = click_target
     result["action_key"] = f"{snap['current_url']}:{click_target}"
+
+    safe_to_click, safety_reason = _passes_preclick_safety_check(
+        step=step,
+        snapshot=snap,
+        chosen_ref=click_target,
+    )
+    step_result["preclick_safety"] = {
+        "passed": safe_to_click,
+        "reason": safety_reason,
+    }
+    if not safe_to_click:
+        result["error"] = f"preclick_safety_failed:{safety_reason}"
+        _log(
+            "ab_runner.preclick_safety_failed",
+            {
+                "index": step_result["index"],
+                "attempt": attempt,
+                "ref": click_target,
+                "reason": safety_reason,
+            },
+        )
+        return result
 
     actionability = _ensure_ab_target_actionable(cli, click_target)
     step_result.update(actionability)
@@ -591,18 +662,18 @@ def _ab_snapshot_to_dom_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         if role == "link":
             links.append({
                 "text": name,
-                "href": "",
-                "testid": "",
-                "aria": "",
-                "id": "",
+                "href": str(element.get("href") or "").strip(),
+                "testid": str(element.get("testid") or "").strip(),
+                "aria": str(element.get("aria_label") or "").strip(),
+                "id": str(element.get("element_id") or "").strip(),
             })
         else:
             buttons.append({
                 "text": name,
-                "testid": "",
-                "aria": "",
+                "testid": str(element.get("testid") or "").strip(),
+                "aria": str(element.get("aria_label") or "").strip(),
                 "title": "",
-                "id": "",
+                "id": str(element.get("element_id") or "").strip(),
                 "selector": "",
             })
 
@@ -613,6 +684,440 @@ def _ab_snapshot_to_dom_context(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         "links": links,
         "inputs": [],
         "data_testids": [],
+        "headings": list(snapshot.get("headings") or []),
+        "active_surfaces": list(snapshot.get("active_surfaces") or []),
+    }
+
+
+def _get_generation_context(objective: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(objective, dict):
+        return {}
+    generation_context = objective.get("generation_context") or {}
+    return generation_context if isinstance(generation_context, dict) else {}
+
+
+def _objective_changed_testids(objective: Optional[Dict[str, Any]]) -> List[str]:
+    generation_context = _get_generation_context(objective)
+    changed_testids = generation_context.get("changed_testids") or []
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for item in changed_testids:
+        testid = str(item or "").strip()
+        if testid and testid not in seen:
+            seen.add(testid)
+            ordered.append(testid)
+    return ordered
+
+
+def _objective_start_route(objective: Optional[Dict[str, Any]]) -> str:
+    generation_context = _get_generation_context(objective)
+    route = str(generation_context.get("start_route") or "").strip()
+    if route:
+        return route
+    for raw_route in generation_context.get("start_route_candidates") or []:
+        route = str(raw_route or "").strip()
+        if route:
+            return route
+    extraction = generation_context.get("extraction") or {}
+    if isinstance(extraction, dict):
+        return str(extraction.get("start_route") or "").strip()
+    return ""
+
+
+def _objective_contract(objective: Optional[Dict[str, Any]]) -> Any:
+    return _get_generation_context(objective).get("contract")
+
+
+def _snapshot_contains_testid(snapshot: Dict[str, Any], testid: str) -> bool:
+    needle = (testid or "").strip().lower()
+    if not needle:
+        return False
+    for bucket in ("interactive_elements", "context_elements"):
+        for element in snapshot.get(bucket) or []:
+            if not isinstance(element, dict):
+                continue
+            if str(element.get("testid") or "").strip().lower() == needle:
+                return True
+    return False
+
+
+def _first_active_surface(snapshot: Dict[str, Any]) -> str:
+    surfaces = snapshot.get("active_surfaces") or []
+    for surface in surfaces:
+        value = str(surface or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _make_search_validation(value: str) -> ValidationCondition:
+    return ValidationCondition(type="element_present", value=value)
+
+
+def _append_search_screenshot_result(
+    *,
+    cli: Any,
+    screenshot_dir: Path,
+    shot_idx: int,
+    results: List[Dict[str, Any]],
+    label: str,
+    mode: str,
+) -> int:
+    path = screenshot_dir / f"shot{shot_idx}.png"
+    cli.screenshot(path)
+    results.append(
+        {
+            "index": len(results),
+            "step": {"action": "screenshot", "label": label},
+            "status": "ok",
+            "outcome": "success",
+            "backend": "agent_browser_cli",
+            "mode": mode,
+            "screenshot_path": str(path),
+            "step_latency_ms": 0,
+        }
+    )
+    return shot_idx + 1
+
+
+def _should_use_testid_search(
+    *,
+    objective: Optional[Dict[str, Any]],
+    initial_steps: List[Dict[str, Any]],
+) -> bool:
+    generation_context = _get_generation_context(objective)
+    if not _objective_changed_testids(objective):
+        return False
+    if bool(generation_context.get("discovery_mode")):
+        return True
+    click_steps = [
+        step for step in initial_steps
+        if str(step.get("action") or "") == "click"
+    ]
+    return len(click_steps) == 0
+
+
+def _run_ab_changed_testid_search(
+    *,
+    cli: Any,
+    preview_url: str,
+    screenshot_dir: Path,
+    objective: Optional[Dict[str, Any]],
+    mode: str,
+    max_retries_per_step: int,
+    session_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    from app.browser.agent_browser_cli import AgentBrowserError
+    from app.context.dom_extractor import extract_ab_context
+
+    changed_testids = _objective_changed_testids(objective)
+    contract = _objective_contract(objective)
+    start_route = _objective_start_route(objective) or "/"
+    results: List[Dict[str, Any]] = []
+    shot_idx = 1
+    steps_succeeded = 0
+    total_retries = 0
+    actions_used = 0
+
+    if start_route:
+        full_url = _resolve_url(preview_url, start_route)
+        cli.open(full_url)
+        settle = _settle_ab_page(cli)
+        results.append(
+            {
+                "index": 0,
+                "step": {"action": "goto", "url": start_route},
+                "status": "ok",
+                "outcome": "success",
+                "backend": "agent_browser_cli",
+                "mode": mode,
+                "page_settle": settle,
+                "session_viewport": session_config,
+                "step_latency_ms": 0,
+            }
+        )
+        steps_succeeded += 1
+
+    for index, testid in enumerate(changed_testids):
+        while actions_used < MAX_TESTID_SEARCH_ACTIONS:
+            snapshot = extract_ab_context(cli, save_raw=(actions_used == 0))
+            if _snapshot_contains_testid(snapshot, testid):
+                ref = cli.find_testid(testid)
+                if ref:
+                    try:
+                        cli.scroll_into_view(ref)
+                    except Exception:
+                        pass
+                shot_idx = _append_search_screenshot_result(
+                    cli=cli,
+                    screenshot_dir=screenshot_dir,
+                    shot_idx=shot_idx,
+                    results=results,
+                    label=f"Changed target visible: {testid}",
+                    mode=mode,
+                )
+                steps_succeeded += 1
+
+                next_proof = ""
+                if index + 1 < len(changed_testids):
+                    next_proof = changed_testids[index + 1]
+                elif contract is not None and getattr(contract, "terminal", None) is not None:
+                    next_proof = str(getattr(getattr(contract, "terminal"), "value", "") or "").strip()
+
+                if not next_proof:
+                    results.append(
+                        {
+                            "index": len(results),
+                            "step": {
+                                "action": "assert_terminal",
+                                "expected_element": testid,
+                            },
+                            "status": "ok",
+                            "outcome": "success",
+                            "backend": "agent_browser_cli",
+                            "mode": mode,
+                            "terminal_condition_reached": True,
+                            "terminal_validation_source": "changed_testid_visible",
+                            "terminal_validation_actual": testid,
+                            "step_latency_ms": 0,
+                        }
+                    )
+                    steps_succeeded += 1
+                    return {
+                        "success": True,
+                        "final_outcome": _classify_final_outcome(success=True),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 0,
+                        "results": results,
+                        "approved_frames": _approved_frame_paths(results),
+                        "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
+                    }
+
+                actions_used += 1
+                click_step = {
+                    "action": "click",
+                    "selector": f"[data-testid='{testid}']",
+                    "label": "",
+                    "text": "",
+                    "validation_condition": _make_search_validation(next_proof),
+                    "success_condition": _make_search_validation(next_proof),
+                    "validation_source": "changed_testid_search",
+                    "preferred_testids": [testid],
+                    "preferred_surface": _first_active_surface(snapshot),
+                    "preferred_texts": [testid, next_proof],
+                }
+                step_result = {
+                    "index": len(results),
+                    "step": click_step,
+                    "status": "failed",
+                    "outcome": "pending",
+                    "backend": "agent_browser_cli",
+                    "mode": mode,
+                    "intent": testid,
+                    "validation_condition": click_step["validation_condition"],
+                    "search_target_testid": testid,
+                }
+                attempt_result = _run_ab_click_attempt(
+                    cli=cli,
+                    step=click_step,
+                    step_result=step_result,
+                    screenshot_dir=screenshot_dir,
+                    shot_idx=shot_idx,
+                    attempt=1,
+                    click_attempt_limit=1,
+                    mode=mode,
+                    extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                )
+                shot_idx = int(attempt_result["shot_idx"])
+                step_result["outcome"] = str(attempt_result["outcome"] or "click_failed")
+                step_result["status"] = "ok" if step_result["outcome"] == "success" else "failed"
+                step_result["step_latency_ms"] = 0
+                if attempt_result["validation"] is not None:
+                    validation = attempt_result["validation"]
+                    condition = validation["condition"]
+                    step_result.update(
+                        {
+                            "validation_result": validation,
+                            "validation_type": condition["type"] if condition else "",
+                            "validation_value": condition["value"] if condition else "",
+                            "validation_source": validation["source"],
+                            "validation_passed": validation["passed"],
+                            "validation_actual": validation["actual"],
+                        }
+                    )
+                if attempt_result["error"]:
+                    step_result["error"] = str(attempt_result["error"])
+                if step_result["status"] != "ok":
+                    _discard_step_screenshots(step_result)
+                    _attach_ab_failure_diagnostics(cli, step_result)
+                    results.append(step_result)
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason=str(step_result.get("outcome") or "click_failed"),
+                        ),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 1,
+                        "failure_reason": str(step_result.get("outcome") or "click_failed"),
+                        "results": results,
+                        "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
+                    }
+                results.append(step_result)
+                steps_succeeded += 1
+                break
+
+            dom_context = _ab_snapshot_to_dom_context(snapshot)
+            suggested_step, attempts = regenerate_single_step_toward_testid(
+                objective=objective or {},
+                target_testid=testid,
+                snapshot=snapshot,
+                dom_context=dom_context,
+                max_attempts=max_retries_per_step,
+                page=None,
+            )
+            total_retries += len(attempts)
+            if suggested_step is None:
+                return {
+                    "success": False,
+                    "final_outcome": _classify_final_outcome(
+                        success=False,
+                        failure_reason=f"target_unreachable:{testid}",
+                    ),
+                    "steps_succeeded": steps_succeeded,
+                    "steps_failed": 1,
+                    "failure_reason": f"target_unreachable:{testid}",
+                    "results": results,
+                    "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
+                }
+
+            actions_used += 1
+            action = str(suggested_step.get("action") or "")
+            if action == "goto":
+                route = str(suggested_step.get("url") or "").strip()
+                full_url = _resolve_url(preview_url, route)
+                try:
+                    cli.open(full_url)
+                    settle = _settle_ab_page(cli)
+                except AgentBrowserError as exc:
+                    return {
+                        "success": False,
+                        "final_outcome": _classify_final_outcome(
+                            success=False,
+                            failure_reason=f"goto_failed:{route}",
+                        ),
+                        "steps_succeeded": steps_succeeded,
+                        "steps_failed": 1,
+                        "failure_reason": f"goto_failed:{exc}",
+                        "results": results,
+                        "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
+                    }
+                results.append(
+                    {
+                        "index": len(results),
+                        "step": suggested_step,
+                        "status": "ok",
+                        "outcome": "success",
+                        "backend": "agent_browser_cli",
+                        "mode": mode,
+                        "page_settle": settle,
+                        "step_latency_ms": 0,
+                    }
+                )
+                steps_succeeded += 1
+                continue
+
+            click_step = dict(suggested_step)
+            click_step["validation_condition"] = _make_search_validation(testid)
+            click_step["success_condition"] = _make_search_validation(testid)
+            click_step["validation_source"] = "changed_testid_search"
+            click_step["preferred_testids"] = [testid]
+            click_step["preferred_surface"] = _first_active_surface(snapshot)
+            click_step["preferred_texts"] = [testid]
+            step_result = {
+                "index": len(results),
+                "step": click_step,
+                "status": "failed",
+                "outcome": "pending",
+                "backend": "agent_browser_cli",
+                "mode": mode,
+                "intent": str(click_step.get("label") or click_step.get("text") or testid),
+                "validation_condition": click_step["validation_condition"],
+                "search_target_testid": testid,
+            }
+            attempt_result = _run_ab_click_attempt(
+                cli=cli,
+                step=click_step,
+                step_result=step_result,
+                screenshot_dir=screenshot_dir,
+                shot_idx=shot_idx,
+                attempt=1,
+                click_attempt_limit=1,
+                mode=mode,
+                extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+            )
+            shot_idx = int(attempt_result["shot_idx"])
+            step_result["outcome"] = str(attempt_result["outcome"] or "click_failed")
+            step_result["status"] = "ok" if step_result["outcome"] == "success" else "failed"
+            step_result["step_latency_ms"] = 0
+            if attempt_result["validation"] is not None:
+                validation = attempt_result["validation"]
+                condition = validation["condition"]
+                step_result.update(
+                    {
+                        "validation_result": validation,
+                        "validation_type": condition["type"] if condition else "",
+                        "validation_value": condition["value"] if condition else "",
+                        "validation_source": validation["source"],
+                        "validation_passed": validation["passed"],
+                        "validation_actual": validation["actual"],
+                    }
+                )
+            if attempt_result["error"]:
+                step_result["error"] = str(attempt_result["error"])
+            if step_result["status"] != "ok":
+                _discard_step_screenshots(step_result)
+                _attach_ab_failure_diagnostics(cli, step_result)
+                results.append(step_result)
+                return {
+                    "success": False,
+                    "final_outcome": _classify_final_outcome(
+                        success=False,
+                        failure_reason=str(step_result.get("outcome") or "click_failed"),
+                    ),
+                    "steps_succeeded": steps_succeeded,
+                    "steps_failed": 1,
+                    "failure_reason": str(step_result.get("outcome") or "click_failed"),
+                    "results": results,
+                    "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
+                }
+            results.append(step_result)
+            steps_succeeded += 1
+        else:
+            return {
+                "success": False,
+                "final_outcome": _classify_final_outcome(
+                    success=False,
+                    failure_reason=f"target_unreachable:{testid}",
+                ),
+                "steps_succeeded": steps_succeeded,
+                "steps_failed": 1,
+                "failure_reason": f"target_unreachable:{testid}",
+                "results": results,
+                "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
+            }
+
+    return {
+        "success": False,
+        "final_outcome": _classify_final_outcome(
+            success=False,
+            failure_reason="target_unreachable",
+        ),
+        "steps_succeeded": steps_succeeded,
+        "steps_failed": 1,
+        "failure_reason": "target_unreachable",
+        "results": results,
+        "metrics": _build_metrics(results, max(len(changed_testids), 1), total_retries),
     }
 
 
@@ -909,8 +1414,6 @@ def _matches_validation_condition(
         return _contains_ci(snapshot_text, expected)
     if cond_type == "element_present":
         return any(_contains_ci(name, expected) for name in element_names)
-    if cond_type == "state_changed":
-        return False
     return False
 
 
@@ -919,9 +1422,14 @@ def _element_names(snapshot: Dict[str, Any]) -> List[str]:
     for bucket in ("interactive_elements", "context_elements"):
         for element in snapshot.get(bucket) or []:
             if isinstance(element, dict):
-                name = str(element.get("name") or "").strip()
-                if name:
-                    names.append(name)
+                for key in ("name", "testid", "aria_label", "element_id", "nearby_text", "surface"):
+                    value = str(element.get(key) or "").strip()
+                    if value:
+                        names.append(value)
+    for heading in snapshot.get("headings") or []:
+        value = str(heading or "").strip()
+        if value:
+            names.append(value)
     return names
 
 
@@ -936,8 +1444,6 @@ def _describe_validation_actual(
         return str(snap_after.get("current_url") or "")
     if condition["type"] == "text_present":
         return str(snap_after.get("snapshot_text") or "")
-    if condition["type"] == "state_changed":
-        return "state_changed"
 
     matched_names = [
         name for name in _element_names(snap_after)
@@ -978,13 +1484,7 @@ def _evaluate_click_validation(
         snapshot_text=str(snap_after.get("snapshot_text") or ""),
         element_names=_element_names(snap_after),
     )
-    if condition["type"] == "state_changed":
-        passed = (
-            str(snap_before.get("current_url") or "") != str(snap_after.get("current_url") or "")
-            or str(snap_before.get("snapshot_text") or "") != str(snap_after.get("snapshot_text") or "")
-        )
-    else:
-        passed = after_matches and not before_matches
+    passed = after_matches and not before_matches
     return StepValidationResult(
         passed=passed,
         condition=condition,
@@ -1030,7 +1530,7 @@ def _step_screenshot_paths(step_result: Dict[str, Any]) -> List[Path]:
 def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
     approved: List[str] = []
     seen: set[str] = set()
-    for result in results:
+    for idx, result in enumerate(results):
         if str(result.get("status") or "") != "ok":
             continue
         outcome = str(result.get("outcome") or "")
@@ -1038,7 +1538,17 @@ def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
         action = str(step.get("action") or "")
         keep = False
         if action == "screenshot":
-            keep = outcome == "success"
+            previous = results[idx - 1] if idx > 0 else {}
+            previous_step = previous.get("step") or {}
+            previous_action = str(previous_step.get("action") or "")
+            previous_ok = str(previous.get("status") or "") == "ok"
+            previous_success = str(previous.get("outcome") or "") == "success"
+            keep = (
+                outcome == "success"
+                and previous_ok
+                and previous_success
+                and previous_action in {"goto", "click"}
+            )
         elif action == "assert_terminal":
             keep = bool(result.get("terminal_condition_reached"))
         if not keep:
@@ -1059,11 +1569,7 @@ def _discard_step_screenshots(step_result: Dict[str, Any]) -> None:
 
 def _should_keep_click_screenshots(step_result: Dict[str, Any]) -> bool:
     outcome = str(step_result.get("outcome") or "")
-    if outcome == "success":
-        return True
-    if outcome == "unvalidated" and bool(step_result.get("state_changed")):
-        return True
-    return False
+    return outcome == "success"
 
 
 def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool:
@@ -1406,6 +1912,27 @@ def run_ab_stepwise(
         cli.open(preview_url)
         session_config = _configure_ab_session(cli, cs)
         _settle_ab_page(cli)
+
+        if _should_use_testid_search(
+            objective=objective,
+            initial_steps=queue,
+        ):
+            _log(
+                "ab_runner.changed_testid_search_start",
+                {
+                    "changed_testids": _objective_changed_testids(objective),
+                    "start_route": _objective_start_route(objective) or "/",
+                },
+            )
+            return _run_ab_changed_testid_search(
+                cli=cli,
+                preview_url=preview_url,
+                screenshot_dir=screenshot_dir,
+                objective=objective,
+                mode=mode,
+                max_retries_per_step=max_retries_per_step,
+                session_config=session_config,
+            )
 
         step_idx = 0
         while step_idx < len(queue) and step_idx < max_steps_per_run:

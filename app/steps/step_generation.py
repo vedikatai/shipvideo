@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import fnmatch
+import re
 from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -355,6 +356,52 @@ def _label_to_selector(label: str) -> str:
     return f"[data-testid='{normalized}']" if normalized else ""
 
 
+def _extract_changed_testids_from_diff(diff_files: List[Dict[str, str]]) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for diff_file in diff_files:
+        patch = str(diff_file.get("patch") or "")
+        if not patch:
+            continue
+        for line in patch.splitlines():
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            for match in re.finditer(r'data-testid=["\']([^"\']+)["\']', line):
+                testid = str(match.group(1) or "").strip()
+                if testid and testid not in seen:
+                    seen.add(testid)
+                    ordered.append(testid)
+    return ordered
+
+
+def _start_route_candidates(
+    *,
+    start_route: str,
+    extraction: Dict[str, Any],
+    real_routes: List[str],
+) -> List[str]:
+    ordered: List[str] = []
+    seen: set[str] = set()
+
+    candidates: List[str] = []
+    extracted_route = str(extraction.get("start_route") or "").strip()
+    if extracted_route:
+        candidates.append(extracted_route)
+    if start_route:
+        candidates.append(start_route)
+    candidates.extend(str(route or "").strip() for route in real_routes)
+    candidates.append("/")
+
+    for route in candidates:
+        if not route or not route.startswith("/"):
+            continue
+        if route in seen:
+            continue
+        seen.add(route)
+        ordered.append(route)
+    return ordered
+
+
 def _upgrade_contract_from_extraction(
     contract: Optional[Any],
     extraction: Dict[str, Any],
@@ -388,19 +435,26 @@ def _upgrade_contract_from_extraction(
             TargetRef(label=label, selector=_label_to_selector(label))
         )
 
-    confidence = getattr(contract, "confidence", "low")
-    if labels and confidence == "low":
-        confidence = "medium"
-
     extraction_notes = list(getattr(contract, "extraction_notes", []) or [])
     extraction_notes.append("contract_targets_upgraded_from_extraction")
 
     return replace(
         contract,
         targets=augmented_targets,
-        confidence=confidence,
         extraction_notes=extraction_notes,
     )
+
+
+def _contract_confidence(contract: Optional[Any]) -> str:
+    return str(getattr(contract, "confidence", "low") or "low").strip().lower()
+
+
+def _can_attempt_direct_plan(contract: Optional[Any]) -> bool:
+    return _contract_confidence(contract) == "high"
+
+
+def _should_fallback_to_guarded_screenshot(contract: Optional[Any]) -> bool:
+    return not _can_attempt_direct_plan(contract)
 
 
 def _log_click_stage(stage: str, steps: List[Dict[str, Any]]) -> None:
@@ -790,7 +844,7 @@ def _build_planning_prompt(
     extraction_block = ""
     if extraction:
         lines = ["=== EXTRACTED JOURNEY FACTS ==="]
-        lines.append("These are extracted from the changed code. Trust them.")
+        lines.append("These are extracted from the changed code. Treat them as hints, not truth.")
         lines.append("")
         if extraction.get("start_route"):
             lines.append(f"START ROUTE: {extraction['start_route']}")
@@ -981,6 +1035,7 @@ async def generate_steps_from_diff(
             {"path": f["path"], "status": f["status"], "patch": f.get("patch", "")}
             for f in diff_files
         ]
+        changed_testids = _extract_changed_testids_from_diff(diff_files)
         budgeted, _ = budget_diff_files(diffs_for_prompt)
         diff_text = json.dumps(budgeted, ensure_ascii=False)
 
@@ -1027,6 +1082,51 @@ async def generate_steps_from_diff(
                 f"targets={[getattr(target, 'label', '') for target in (getattr(contract, 'targets', []) or [])]}",
                 flush=True,
             )
+
+        if _should_fallback_to_guarded_screenshot(contract):
+            start_candidates = _start_route_candidates(
+                start_route=start_route,
+                extraction=extraction,
+                real_routes=real_routes,
+            )
+            initial_route = start_candidates[0] if start_candidates else "/"
+            print(
+                "[steps.step_generation] contract not strong enough for direct multi-step demo; "
+                "entering discovery mode "
+                f"testids={changed_testids} start_candidates={start_candidates}",
+                flush=True,
+            )
+            return {
+                "steps": [
+                    {
+                        "action": "goto",
+                        "url": initial_route,
+                    },
+                    {
+                        "action": "screenshot",
+                        "label": "Initial state",
+                    },
+                ],
+                "narration": fallback_narration,
+                "suggested_demo_flow": "",
+                "llm_cost_usd": total_cost,
+                "generation_context": {
+                    "dom_data": dom_data,
+                    "diffs_for_prompt": diffs_for_prompt,
+                    "real_routes": real_routes,
+                    "route_catalog": {},
+                    "real_inputs": real_inputs,
+                    "data_testids": real_data_testids,
+                    "changed_testids": changed_testids,
+                    "start_route": initial_route,
+                    "start_route_candidates": start_candidates,
+                    "suggested_demo_flow": "",
+                    "app_hints": app_hints_text,
+                    "contract": contract,
+                    "extraction": extraction,
+                    "discovery_mode": True,
+                },
+            }
 
         if not start_route and extraction.get("start_route"):
             start_route = extraction["start_route"].strip()
@@ -1263,6 +1363,7 @@ async def generate_steps_from_diff(
                 "route_catalog": route_catalog,
                 "real_inputs": real_inputs,
                 "data_testids": real_data_testids,
+                "changed_testids": changed_testids,
                 "start_route": start_route,
                 "suggested_demo_flow": suggested_demo_flow,
                 "app_hints": app_hints_text,

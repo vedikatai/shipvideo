@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 from observability import pipeline_step
 from app.config_types import load_capture_settings
@@ -52,7 +53,7 @@ def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
         return None
     cond_type = str(raw.get("type") or "").strip()
     cond_value = str(raw.get("value") or "").strip()
-    if cond_type not in {"url_match", "text_present", "element_present", "state_changed"}:
+    if cond_type not in {"url_match", "text_present", "element_present"}:
         return None
     if not cond_value:
         return None
@@ -133,6 +134,140 @@ def _lookup_benchmark_result(
     return {
         "benchmark_outcome": "inconclusive",
         "benchmark_has_paired_baseline": False,
+    }
+
+
+def _contains_ci(haystack: str, needle: str) -> bool:
+    return needle.lower() in haystack.lower()
+
+
+def _collect_target_markers(generation_context: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(generation_context, dict):
+        return []
+    markers: List[str] = []
+    seen: set[str] = set()
+
+    for raw in generation_context.get("changed_testids") or []:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            markers.append(value)
+
+    contract = generation_context.get("contract")
+    if contract is not None:
+        for target in getattr(contract, "targets", []) or []:
+            value = str(getattr(target, "label", "") or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                markers.append(value)
+        terminal = getattr(contract, "terminal", None)
+        terminal_value = str(getattr(terminal, "value", "") or "").strip() if terminal is not None else ""
+        if terminal_value and terminal_value not in seen:
+            seen.add(terminal_value)
+            markers.append(terminal_value)
+
+    extraction = generation_context.get("extraction") or {}
+    if isinstance(extraction, dict):
+        for raw in extraction.get("click_labels") or []:
+            value = str(raw or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                markers.append(value)
+        terminal_value = str(extraction.get("terminal_testid") or "").strip()
+        if terminal_value and terminal_value not in seen:
+            seen.add(terminal_value)
+            markers.append(terminal_value)
+
+    return markers
+
+
+def _result_path(result: Dict[str, Any]) -> str:
+    url_after = str(result.get("url_after") or "").strip()
+    if url_after:
+        return urlparse(url_after).path or "/"
+    step = result.get("step") or {}
+    if str(step.get("action") or "") == "goto":
+        return str(step.get("url") or "").strip() or "/"
+    return ""
+
+
+def _result_mentions_marker(result: Dict[str, Any], marker: str) -> bool:
+    if not marker:
+        return False
+    values = [
+        str(result.get("terminal_validation_actual") or ""),
+        str(result.get("validation_actual") or ""),
+        str(result.get("search_target_testid") or ""),
+        str((result.get("step") or {}).get("label") or ""),
+        str((result.get("step") or {}).get("expected_element") or ""),
+        str((result.get("step") or {}).get("selector") or ""),
+        str((result.get("step") or {}).get("url") or ""),
+    ]
+    return any(_contains_ci(value, marker) for value in values if value)
+
+
+def _build_render_approval(
+    *,
+    generation_context: Optional[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+    approved_frames: List[str],
+) -> Dict[str, Any]:
+    reasons: List[str] = []
+    start_route = ""
+    if isinstance(generation_context, dict):
+        start_route = str(generation_context.get("start_route") or "").strip()
+        if not start_route:
+            extraction = generation_context.get("extraction") or {}
+            if isinstance(extraction, dict):
+                start_route = str(extraction.get("start_route") or "").strip()
+
+    target_markers = _collect_target_markers(generation_context)
+    wrong_click_detected = any(
+        str(result.get("outcome") or "") == "wrong_click"
+        for result in results
+    )
+    target_route_reached = (
+        True if not start_route else any(_result_path(result) == start_route for result in results)
+    )
+    expected_proof_satisfied = any(
+        bool(result.get("terminal_condition_reached"))
+        or (
+            str((result.get("step") or {}).get("action") or "") == "click"
+            and bool(result.get("validation_passed"))
+        )
+        for result in results
+    )
+    expected_changed_target_shown = (
+        True
+        if not target_markers
+        else any(
+            _result_mentions_marker(result, marker)
+            for marker in target_markers
+            for result in results
+        )
+    )
+
+    if not approved_frames:
+        reasons.append("no_approved_frames")
+    if wrong_click_detected:
+        reasons.append("wrong_click_detected")
+    if not target_route_reached:
+        reasons.append("target_route_not_reached")
+    if not expected_changed_target_shown:
+        reasons.append("expected_changed_target_not_shown")
+    if not expected_proof_satisfied:
+        reasons.append("expected_proof_not_satisfied")
+
+    return {
+        "is_sendable": len(reasons) == 0,
+        "reasons": reasons,
+        "target_route_reached": target_route_reached,
+        "expected_changed_target_shown": expected_changed_target_shown,
+        "expected_proof_satisfied": expected_proof_satisfied,
+        "wrong_click_detected": wrong_click_detected,
+        "approved_frame_count": len(approved_frames),
+        "target_markers": target_markers,
+        "start_route": start_route,
     }
 
 
@@ -227,6 +362,23 @@ def run_capture(
                 "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
+
+    approved_frames = list(_runner_result.get("approved_frames") or [])
+    render_approval = _build_render_approval(
+        generation_context=generation_context,
+        results=list(_runner_result.get("results") or []),
+        approved_frames=approved_frames,
+    )
+    if _result.get("success") and not approved_frames:
+        _result["success"] = False
+        _result["steps_failed"] = max(int(_result.get("steps_failed", 0)), 1)
+        _result["failure_reason"] = "no_validated_frames"
+    if _result.get("success") and not render_approval.get("is_sendable", False):
+        _result["success"] = False
+        _result["steps_failed"] = max(int(_result.get("steps_failed", 0)), 1)
+        _result["failure_reason"] = ",".join(render_approval.get("reasons") or ["render_not_sendable"])
+    _result["approved_frames"] = approved_frames
+    _result["render_approval"] = render_approval
 
 
 

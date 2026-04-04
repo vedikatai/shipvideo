@@ -37,9 +37,13 @@ class SnapshotPayload(TypedDict):
 
 
 SelectionReason = Literal[
+    "testid_match",
+    "aria_match",
+    "id_match",
     "exact_match",
     "case_insensitive_match",
     "partial_match",
+    "scored_match",
     "ambiguous",
     "no_match",
     "ab_find",
@@ -63,10 +67,10 @@ class SelectionResult(TypedDict):
     mode: ExperimentMode
 
 
-ValidationSource = Literal["step", "test_case", "legacy_state_change", ""]
+ValidationSource = Literal["step", "test_case", ""]
 
 
-ValidationConditionType = Literal["url_match", "text_present", "element_present", "state_changed"]
+ValidationConditionType = Literal["url_match", "text_present", "element_present"]
 
 
 class ValidationCondition(TypedDict):

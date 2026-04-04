@@ -17,7 +17,7 @@ class TargetRef:
 @dataclass
 class TerminalCondition:
 
-    type: Literal["url_match", "text_present", "element_present", "state_changed"]
+    type: Literal["url_match", "text_present", "element_present"]
     value: str                                                   
 
 
@@ -38,7 +38,10 @@ class DemoContract:
     extraction_notes: List[str] = field(default_factory=list)
 
     def is_runnable(self) -> bool:
-        return bool(self.start_route) and len(self.targets) > 0
+        return self.confidence == "high" and bool(self.start_route) and len(self.targets) > 0 and self.terminal is not None
+
+    def is_direct_plan_eligible(self) -> bool:
+        return self.confidence == "high"
 
     def summary(self) -> str:
         terminal_str = f"{self.terminal.type}:{self.terminal.value!r}" if self.terminal else "none"

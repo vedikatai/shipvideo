@@ -43,6 +43,8 @@ class DomSnapshot(TypedDict):
     links: List[LinkCandidate]
     inputs: List[InputCandidate]
     data_testids: List[TestIdCandidate]
+    headings: List[str]
+    active_surfaces: List[str]
 
 
 
@@ -67,7 +69,7 @@ ExperimentMode = Literal["deterministic", "deterministic_plus_llm"]
 
 
 
-SuccessConditionType = Literal["url_match", "text_present", "element_present", "state_changed"]
+SuccessConditionType = Literal["url_match", "text_present", "element_present"]
 
 
 class SuccessCondition(TypedDict):
@@ -82,12 +84,21 @@ class AgentBrowserElement(TypedDict):
     name: str
     url: str
     visible: bool
+    testid: str
+    aria_label: str
+    element_id: str
+    nearby_text: str
+    surface: str
+    href: str
 
 
 class AgentBrowserSnapshot(TypedDict):
 
     current_url: str
+    current_path: str
     snapshot_text: str
     interactive_elements: List[AgentBrowserElement]
     context_elements: List[AgentBrowserElement]
     raw_snapshot_path: str
+    active_surfaces: List[str]
+    headings: List[str]

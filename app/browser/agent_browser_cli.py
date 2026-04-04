@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from app.browser.agent_browser_types import CommandResult, SnapshotPayload
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot
@@ -359,6 +360,9 @@ class AgentBrowserCLI:
         except AgentBrowserError:
             return ""
 
+    def find_testid(self, testid: str) -> str:
+        return self.find_testid_ref(testid)
+
     def find_role_ref(self, role: str, name: str) -> str:
         role_norm = (role or "").strip().lower()
         target = (name or "").strip()
@@ -566,23 +570,55 @@ class AgentBrowserCLI:
         data = result.get("data") or {}
         refs: Dict[str, Any] = data.get("refs") or {}
         snapshot_text: str = data.get("snapshot") or result["stdout"]
+        current_path = urlparse(current_url).path or "/"
 
         interactive_elements: List[AgentBrowserElement] = []
         context_elements: List[AgentBrowserElement] = []
+        active_surfaces: List[str] = []
+        headings: List[str] = []
         for ref_id, meta in refs.items():
             if not isinstance(meta, dict):
                 continue
+            role = (meta.get("role") or "").lower().strip()
+            name = (meta.get("name") or "").strip()
+            testid = str(meta.get("testid") or meta.get("data-testid") or "").strip()
+            aria_label = str(meta.get("ariaLabel") or meta.get("aria-label") or "").strip()
+            element_id = str(meta.get("id") or "").strip()
+            nearby_text = str(
+                meta.get("nearbyText")
+                or meta.get("text")
+                or meta.get("description")
+                or ""
+            ).strip()
+            surface = str(
+                meta.get("surface")
+                or meta.get("container")
+                or meta.get("region")
+                or meta.get("dialog")
+                or ""
+            ).strip()
+            href = str(meta.get("href") or "").strip()
             element = AgentBrowserElement(
                 ref=f"@{ref_id}",
-                role=(meta.get("role") or "").lower().strip(),
-                name=(meta.get("name") or "").strip(),
+                role=role,
+                name=name,
                 url=current_url,
                 visible=True,
+                testid=testid,
+                aria_label=aria_label,
+                element_id=element_id,
+                nearby_text=nearby_text,
+                surface=surface,
+                href=href,
             )
             if element["role"] in _INTERACTIVE_ROLES:
                 interactive_elements.append(element)
             else:
                 context_elements.append(element)
+            if surface and surface not in active_surfaces:
+                active_surfaces.append(surface)
+            if role == "heading" and name and name not in headings:
+                headings.append(name)
 
         print(
             f"[agent_browser] snapshot normalized "
@@ -594,10 +630,13 @@ class AgentBrowserCLI:
 
         return AgentBrowserSnapshot(
             current_url=current_url,
+            current_path=current_path,
             snapshot_text=snapshot_text,
             interactive_elements=interactive_elements,
             context_elements=context_elements,
             raw_snapshot_path=raw_snapshot_path,
+            active_surfaces=active_surfaces[:8],
+            headings=headings[:12],
         )
 
 

@@ -13,7 +13,11 @@ FFMPEG_LOGLEVEL = "-loglevel", "error"
 
 
 @pipeline_step("render")
-def render_video(approved_frames: Optional[Iterable[str | Path]] = None):
+def render_video(
+    approved_frames: Optional[Iterable[str | Path]] = None,
+    *,
+    render_approval: Optional[dict] = None,
+):
     output_path = SCREENSHOT_DIR / "out.mp4"
 
     cs = load_capture_settings()
@@ -25,6 +29,13 @@ def render_video(approved_frames: Optional[Iterable[str | Path]] = None):
         path = Path(frame)
         if path.exists():
             shot_files.append(str(path))
+
+    approval = render_approval or {}
+    if approval and not bool(approval.get("is_sendable")):
+        raise RuntimeError(
+            "Render aborted because video approval is not sendable: "
+            f"{approval.get('reasons') or ['unknown']}"
+        )
 
     if not shot_files:
         raise FileNotFoundError("No approved screenshot frames provided for render")

@@ -204,6 +204,28 @@ def run_pipeline(
         generation_context
         and (generation_context.get("suggested_demo_flow") or "").strip()
     )
+    has_changed_testid_recovery = bool(
+        generation_context
+        and (generation_context.get("changed_testids") or [])
+    )
+    screenshot_only_plan = bool(steps) and all(
+        isinstance(step, dict) and str(step.get("action") or "") == "screenshot"
+        for step in (steps or [])
+    )
+
+    if screenshot_only_plan and not has_changed_testid_recovery:
+        err = RuntimeError(
+            "Step generation did not produce a sendable proof-backed demo plan. "
+            "Pipeline aborted before capture."
+        )
+        _finalize_run_metrics(success=False, error=err)
+        raise err
+    if screenshot_only_plan and has_changed_testid_recovery:
+        print(
+            "[steps.pipeline] screenshot-only plan accepted because changed-testid "
+            "recovery context is available",
+            flush=True,
+        )
 
     if use_script_first and has_demo_flow:
         print("[steps.pipeline] trying script-first pipeline", flush=True)
@@ -228,11 +250,17 @@ def run_pipeline(
                 "steps_failed": 0,
                 "failure_reason": None,
                 "success": True,
+                "render_approval": {
+                    "is_sendable": False,
+                    "reasons": ["script_pipeline_not_proof_backed"],
+                },
             }
             print(
-                f"[steps.pipeline] script-first succeeded attempts={result['attempts']}",
+                "[steps.pipeline] script-first produced output but is not proof-backed; "
+                "falling back to stepwise for sendable approval",
                 flush=True,
             )
+            video_path = None
         except ScriptPipelineError as e:
             print(
                 f"[steps.pipeline] script-first failed ({e}); falling back to stepwise",
@@ -282,7 +310,19 @@ def run_pipeline(
                     f"steps_failed={capture_summary.get('steps_failed')} "
                     f"failure_reason={capture_summary.get('failure_reason')}."
                 )
-            render_video(capture_summary.get("approved_frames") or [])
+            render_approval = capture_summary.get("render_approval") or {}
+            if not render_approval.get("is_sendable", False):
+                raise RuntimeError(
+                    "Stepwise capture did not meet sendable-video approval. "
+                    f"reasons={render_approval.get('reasons') or ['unknown']}."
+                )
+            approved_frames = capture_summary.get("approved_frames") or []
+            if not approved_frames:
+                raise RuntimeError(
+                    "Stepwise capture produced no validated frames. "
+                    "Pipeline aborted before rendering."
+                )
+            render_video(approved_frames, render_approval=render_approval)
             video_path = SCREENSHOT_DIR / "out.mp4"
             pipeline_used = "stepwise"
             capture_summary["pipeline"] = "stepwise"

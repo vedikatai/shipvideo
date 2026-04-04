@@ -71,6 +71,23 @@ def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
         if href.startswith("/"):
             routes.add(href)
 
+    headings = page.eval_on_selector_all(
+        "h1, h2, h3, [role='heading']",
+        f"""els => els.slice(0, {max_items}).map(e => (
+            (e.innerText || "").trim().slice(0, 120)
+        )).filter(Boolean)""",
+    ) or []
+
+    active_surfaces = page.eval_on_selector_all(
+        "[role='dialog'], [role='tabpanel'], [aria-modal='true'], [data-testid], section, main",
+        f"""els => els.slice(0, {max_items}).map(e => (
+            e.getAttribute('aria-label')
+            || e.getAttribute('data-testid')
+            || e.getAttribute('id')
+            || (e.tagName || '').toLowerCase()
+        )).filter(Boolean)""",
+    ) or []
+
     return {
         "current_path": current_path or "/",
         "routes": sorted(routes),
@@ -78,6 +95,8 @@ def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
         "links": links,
         "inputs": [],                                                                
         "data_testids": dedup_tids,
+        "headings": [str(item).strip() for item in headings if str(item).strip()][:max_items],
+        "active_surfaces": [str(item).strip() for item in active_surfaces if str(item).strip()][:max_items],
     }
 
 
@@ -126,4 +145,3 @@ def merge_ab_route_snapshots(
         "elements_by_route": elements_by_route,
         "snapshot_texts_by_route": snapshot_texts_by_route,
     }
-

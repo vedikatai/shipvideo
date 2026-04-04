@@ -193,6 +193,81 @@ def generate_next_steps(
     return steps
 
 
+def generate_single_step_toward_testid(
+    *,
+    target_testid: str,
+    snapshot: Dict[str, Any],
+    objective: Dict[str, Any],
+    previous_error: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    if not deployment:
+        raise RuntimeError("AZURE_OPENAI_DEPLOYMENT must be set")
+
+    schema = {
+        "name": "single_step_toward_testid",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["goto", "click"]},
+                        "selector": {"type": "string"},
+                        "text": {"type": "string"},
+                        "url": {"type": "string"},
+                        "label": {"type": "string"},
+                        "reasoning": {"type": "string"},
+                    },
+                    "required": ["action", "selector", "text", "url", "label", "reasoning"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["step"],
+            "additionalProperties": False,
+        },
+    }
+
+    system_msg = (
+        "You are navigating toward one specific changed UI target.\n"
+        "Choose exactly one next action from the CURRENT browser evidence.\n"
+        "Return one action only.\n"
+        "Never invent routes, labels, or selectors.\n"
+        "If you choose click, it must target a currently visible interactive element.\n"
+        "If an element has a testid in the snapshot, prefer selector=\"[data-testid='x']\".\n"
+        "If an element has an aria label in the snapshot, prefer selector=\"[aria-label='x']\".\n"
+        "Otherwise use label with exact visible text from the snapshot.\n"
+        "Choose the single action most likely to make the target testid visible next."
+    )
+    payload = {
+        "objective": objective,
+        "target_testid": target_testid,
+        "current_url": snapshot.get("current_url", ""),
+        "current_path": snapshot.get("current_path", "/"),
+        "headings": snapshot.get("headings", []),
+        "active_surfaces": snapshot.get("active_surfaces", []),
+        "interactive_elements": snapshot.get("interactive_elements", []),
+        "previous_error": previous_error or {},
+    }
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": json.dumps(_json_safe(payload), ensure_ascii=False)},
+    ]
+    client = _get_client()
+    completion, data = _call_with_fallback(client, deployment, messages, 400, schema)
+
+    usage = getattr(completion, "usage", None)
+    pt = getattr(usage, "prompt_tokens", 0) or 0
+    ct = getattr(usage, "completion_tokens", 0) or 0
+    record_spend(pt, ct)
+
+    step = data.get("step") or {}
+    if not step:
+        raise RuntimeError("generate_single_step_toward_testid: empty step")
+    return step
+
+
 def _call_llm_simple(prompt: str) -> str:
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment:
