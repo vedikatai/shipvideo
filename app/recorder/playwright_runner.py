@@ -1,18 +1,3 @@
-"""
-Playwright runner: executes a generated `run_demo(page, context)` function
-with continuous video recording enabled at the browser context level.
-
-Video quality:
-- Playwright's built-in record_video_dir produces smooth, continuous .webm
-  (real screen recording, not stitched screenshots).
-- A cursor + click-ripple overlay is injected via add_init_script for visual
-  clarity in the recorded output.
-
-Contract for the generated script:
-- Must define `def run_demo(page, context):`
-- `base_url` and `output_dir` are injected as module-level variables.
-- Must NOT call sync_playwright(), browser.launch(), or close anything.
-"""
 from __future__ import annotations
 
 import json
@@ -23,8 +8,8 @@ from typing import Any, Dict, Optional
 
 from playwright.sync_api import sync_playwright
 
-# Cursor dot + click ripple overlay injected into every page load.
-# Runs entirely in-page JS, invisible to automation detection.
+
+
 _CURSOR_RIPPLE_JS = r"""
 (function () {
   if (document.__shipvideoOverlay) return;
@@ -79,31 +64,14 @@ def run_script(
     output_dir: Path,
     timeout_seconds: int = 120,
 ) -> Dict[str, Any]:
-    """
-    Execute the generated `run_demo(page, context)` function with video recording.
-
-    Steps:
-    1. Compile and exec the script to extract `run_demo`.
-    2. Launch Chromium with record_video_dir enabled.
-    3. Inject cursor/ripple overlay via add_init_script.
-    4. Navigate to base_url, then call run_demo(page, context).
-    5. Close context to flush the video.
-
-    Returns:
-        dict: {
-            "success": bool,
-            "webm_path": str | None,   # path to the recorded .webm
-            "error": str | None,
-        }
-    """
     output_dir.mkdir(parents=True, exist_ok=True)
     video_dir = output_dir / "video_tmp"
     video_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: compile the script and extract run_demo
+
     ns: Dict[str, Any] = {}
     try:
-        exec(compile(script, "<generated_demo>", "exec"), ns)  # noqa: S102
+        exec(compile(script, "<generated_demo>", "exec"), ns)              
     except SyntaxError as e:
         _log("script_runner.syntax_error", {"error": str(e)})
         return {"success": False, "webm_path": None, "error": f"syntax_error: {e}"}
@@ -116,7 +84,7 @@ def run_script(
             "error": "script did not define run_demo(page, context)",
         }
 
-    # Step 2-5: browser setup + execution
+
     video_path: Optional[str] = None
     error_str: Optional[str] = None
     success = False
@@ -139,7 +107,7 @@ def run_script(
             page = context.new_page()
             page.add_init_script(_CURSOR_RIPPLE_JS)
 
-            # Expose base_url and output_dir to the generated function scope
+
             ns["base_url"] = base_url
             ns["output_dir"] = str(output_dir)
             ns["page"] = page
@@ -149,7 +117,7 @@ def run_script(
                 page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
                 _log("script_runner.started", {"base_url": base_url})
 
-                # Run the generated demo function
+
                 run_demo(page, context)
 
                 success = True
@@ -158,7 +126,7 @@ def run_script(
                 error_str = f"{type(e).__name__}: {e}"
                 _log("script_runner.execution_error", {"error": error_str})
             finally:
-                # Always capture video path before closing
+
                 try:
                     video_path = page.video.path()
                 except Exception:
@@ -172,15 +140,15 @@ def run_script(
         traceback.print_exc()
         return {"success": False, "webm_path": None, "error": error_str}
 
-    # Confirm the video file exists (context.close() finalizes it)
+
     if video_path and Path(video_path).exists():
         _log("script_runner.video_ready", {"path": video_path, "success": success})
         if success:
             return {"success": True, "webm_path": video_path, "error": None}
-        # Partial video on failure — still return path so caller can decide
+
         return {"success": False, "webm_path": video_path, "error": error_str}
 
-    # Fallback: scan video_dir for any .webm produced
+
     webm_files = sorted(video_dir.glob("*.webm"), key=lambda p: p.stat().st_size, reverse=True)
     if webm_files:
         video_path = str(webm_files[0])

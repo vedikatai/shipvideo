@@ -1,9 +1,3 @@
-"""
-PR extraction: fetch changed files and unified diffs for a pull request from GitHub.
-
-Single responsibility: call GitHub REST API and return a list of file entries
-(path, status, patch). Used by step generation to ground LLM prompts in real code changes.
-"""
 from __future__ import annotations
 
 import os
@@ -13,7 +7,7 @@ import requests
 
 from observability import pipeline_step
 
-# Truncate large patches so we don't send huge payloads to the LLM
+
 MAX_PATCH_CHARS = 3000
 TRUNCATION_SUFFIX = "\n... (truncated)"
 PER_PAGE = 100
@@ -22,19 +16,6 @@ MAX_PAGES = 50
 
 @pipeline_step("pr_extraction")
 def fetch_pr_diff(repo_full_name: str, pr_number: int) -> List[Dict[str, str]]:
-    """
-    Fetches changed files and their diffs for a PR using the GitHub REST API.
-
-    Args:
-        repo_full_name: Repository in "owner/repo" form.
-        pr_number: Pull request number.
-
-    Returns:
-        List of dicts, each with:
-          - path: str (e.g. "app/pricing/page.tsx")
-          - status: str ("added" | "modified" | "removed" | "renamed")
-          - patch: str (unified diff, truncated to MAX_PATCH_CHARS per file)
-    """
     token = os.getenv("GITHUB_TOKEN")
     if not token:
         raise ValueError("GITHUB_TOKEN not set")

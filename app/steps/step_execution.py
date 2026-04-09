@@ -1,26 +1,10 @@
-"""
-Step execution: entry point that runs capture steps against a preview URL.
-
-Delegates all step-by-step execution, navigation detection, and retry logic
-to app.execution.step_runner.
-
-Backend switch (Phase 3 / Phase 5):
-    Default capture backend is Agent Browser CLI (run_ab_stepwise). Set
-    BROWSER_BACKEND=playwright to use the legacy Playwright stepwise runner.
-
-    BROWSER_BACKEND=agent_browser_cli  — default when unset
-    BROWSER_BACKEND=playwright          — opt-in legacy Playwright stepwise
-
-    Optionally set EXPERIMENT_MODE to control the ref-selection mode:
-    EXPERIMENT_MODE=deterministic           — Mode A (default, baseline)
-    EXPERIMENT_MODE=deterministic_plus_llm  — Mode B (LLM fallback scaffold)
-"""
 from __future__ import annotations
 
 import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 from observability import pipeline_step
 from app.config_types import load_capture_settings
@@ -38,15 +22,15 @@ DEFAULT_STEPS: List[Dict[str, Any]] = [
 
 MAX_STEP_RETRIES = 3
 
-# ---------------------------------------------------------------------------
-# Phase 3 — Backend switch
-# ---------------------------------------------------------------------------
 
-#: Valid values for BROWSER_BACKEND.
+
+
+
+
 BrowserBackend = Literal["playwright", "agent_browser_cli"]
 
-#: Active backend for this process. Defaults to Agent Browser CLI; set
-#: BROWSER_BACKEND=playwright to use Playwright stepwise instead.
+
+
 def _resolve_browser_backend() -> BrowserBackend:
     raw = os.getenv("BROWSER_BACKEND", "").strip().lower()
     if raw == "playwright":
@@ -56,16 +40,15 @@ def _resolve_browser_backend() -> BrowserBackend:
 
 BROWSER_BACKEND: BrowserBackend = _resolve_browser_backend()
 
-#: Experiment mode used when BROWSER_BACKEND=agent_browser_cli.
-#: Reads EXPERIMENT_MODE env var; defaults to "deterministic" (Mode A).
+
+
 _EXPERIMENT_MODE: str = os.getenv("EXPERIMENT_MODE", "deterministic").strip() or "deterministic"
 
-#: Declared default for telemetry / UI (Agent Browser is the default capture path).
+
 _DEFAULT_BACKEND: BrowserBackend = "agent_browser_cli"
 
 
 def _normalize_success_condition(raw: Any) -> Optional[SuccessCondition]:
-    """Return a validated SuccessCondition dict, or None when invalid/missing."""
     if not isinstance(raw, dict):
         return None
     cond_type = str(raw.get("type") or "").strip()
@@ -81,16 +64,6 @@ def _attach_test_case_success_conditions(
     steps: List[Dict[str, Any]],
     test_case_id: str,
 ) -> List[Dict[str, Any]]:
-    """
-    Copy fixed-suite step success conditions onto the runtime steps when possible.
-
-    Small safe assumption:
-        - Step-local success_condition always wins.
-        - When test_case_id resolves to a fixed test case, index-aligned click
-          steps inherit the test case step's success_condition if present.
-        - If no step-level condition is present on the last click step, fall back
-          to the test case's top-level success_condition.
-    """
     cloned_steps = [dict(step) for step in steps]
     for step in cloned_steps:
         explicit = (
@@ -149,14 +122,6 @@ def _lookup_benchmark_result(
     mode: str,
     test_case_id: str,
 ) -> Dict[str, Any]:
-    """
-    Return paired benchmark metadata for one test case from experiment_summary.
-
-    This separates:
-      - single-run health (`final_outcome`)
-      - paired benchmark result for this test case
-      - repo-level recommendation
-    """
     for mode_summary in experiment_summary.get("mode_summaries") or []:
         if str(mode_summary.get("mode") or "") != mode:
             continue
@@ -172,6 +137,140 @@ def _lookup_benchmark_result(
     }
 
 
+def _contains_ci(haystack: str, needle: str) -> bool:
+    return needle.lower() in haystack.lower()
+
+
+def _collect_target_markers(generation_context: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(generation_context, dict):
+        return []
+    markers: List[str] = []
+    seen: set[str] = set()
+
+    for raw in generation_context.get("changed_testids") or []:
+        value = str(raw or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            markers.append(value)
+
+    contract = generation_context.get("contract")
+    if contract is not None:
+        for target in getattr(contract, "targets", []) or []:
+            value = str(getattr(target, "label", "") or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                markers.append(value)
+        terminal = getattr(contract, "terminal", None)
+        terminal_value = str(getattr(terminal, "value", "") or "").strip() if terminal is not None else ""
+        if terminal_value and terminal_value not in seen:
+            seen.add(terminal_value)
+            markers.append(terminal_value)
+
+    extraction = generation_context.get("extraction") or {}
+    if isinstance(extraction, dict):
+        for raw in extraction.get("click_labels") or []:
+            value = str(raw or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                markers.append(value)
+        terminal_value = str(extraction.get("terminal_testid") or "").strip()
+        if terminal_value and terminal_value not in seen:
+            seen.add(terminal_value)
+            markers.append(terminal_value)
+
+    return markers
+
+
+def _result_path(result: Dict[str, Any]) -> str:
+    url_after = str(result.get("url_after") or "").strip()
+    if url_after:
+        return urlparse(url_after).path or "/"
+    step = result.get("step") or {}
+    if str(step.get("action") or "") == "goto":
+        return str(step.get("url") or "").strip() or "/"
+    return ""
+
+
+def _result_mentions_marker(result: Dict[str, Any], marker: str) -> bool:
+    if not marker:
+        return False
+    values = [
+        str(result.get("terminal_validation_actual") or ""),
+        str(result.get("validation_actual") or ""),
+        str(result.get("search_target_testid") or ""),
+        str((result.get("step") or {}).get("label") or ""),
+        str((result.get("step") or {}).get("expected_element") or ""),
+        str((result.get("step") or {}).get("selector") or ""),
+        str((result.get("step") or {}).get("url") or ""),
+    ]
+    return any(_contains_ci(value, marker) for value in values if value)
+
+
+def _build_render_approval(
+    *,
+    generation_context: Optional[Dict[str, Any]],
+    results: List[Dict[str, Any]],
+    approved_frames: List[str],
+) -> Dict[str, Any]:
+    reasons: List[str] = []
+    start_route = ""
+    if isinstance(generation_context, dict):
+        start_route = str(generation_context.get("start_route") or "").strip()
+        if not start_route:
+            extraction = generation_context.get("extraction") or {}
+            if isinstance(extraction, dict):
+                start_route = str(extraction.get("start_route") or "").strip()
+
+    target_markers = _collect_target_markers(generation_context)
+    wrong_click_detected = any(
+        str(result.get("outcome") or "") == "wrong_click"
+        for result in results
+    )
+    target_route_reached = (
+        True if not start_route else any(_result_path(result) == start_route for result in results)
+    )
+    expected_proof_satisfied = any(
+        bool(result.get("terminal_condition_reached"))
+        or (
+            str((result.get("step") or {}).get("action") or "") == "click"
+            and bool(result.get("validation_passed"))
+        )
+        for result in results
+    )
+    expected_changed_target_shown = (
+        True
+        if not target_markers
+        else any(
+            _result_mentions_marker(result, marker)
+            for marker in target_markers
+            for result in results
+        )
+    )
+
+    if not approved_frames:
+        reasons.append("no_approved_frames")
+    if wrong_click_detected:
+        reasons.append("wrong_click_detected")
+    if not target_route_reached:
+        reasons.append("target_route_not_reached")
+    if not expected_changed_target_shown:
+        reasons.append("expected_changed_target_not_shown")
+    if not expected_proof_satisfied:
+        reasons.append("expected_proof_not_satisfied")
+
+    return {
+        "is_sendable": len(reasons) == 0,
+        "reasons": reasons,
+        "target_route_reached": target_route_reached,
+        "expected_changed_target_shown": expected_changed_target_shown,
+        "expected_proof_satisfied": expected_proof_satisfied,
+        "wrong_click_detected": wrong_click_detected,
+        "approved_frame_count": len(approved_frames),
+        "target_markers": target_markers,
+        "start_route": start_route,
+    }
+
+
 @pipeline_step("step_execution")
 def run_capture(
     preview_url: str,
@@ -181,40 +280,6 @@ def run_capture(
     generation_context: Optional[Dict[str, Any]] = None,
     test_case_id: str = "",
 ) -> Dict[str, Any]:
-    """
-    Execute capture steps against the preview URL and write screenshots to disk.
-
-    Dispatches to the Playwright runner (default) or the Agent Browser
-    experiment runner based on the BROWSER_BACKEND environment variable.
-
-    Phase 4 / Phase 5 additions (backward-compatible):
-        test_case_id — optional experiment test case identifier. When non-empty,
-                       run artifacts (run_trace.json, run_summary.json) are saved
-                       to app/data/experiment_runs/<run_id>/ via ExperimentLogger.
-        backend      — added to return dict so callers can identify which backend ran.
-        mode         — added to return dict for experiment run traceability.
-        test_case_id — echoed in return dict for downstream comparison logic.
-        final_outcome — single-run health for this backend invocation.
-        benchmark_outcome / benchmark_has_paired_baseline — paired benchmark
-                       result for this test case when a Playwright baseline exists.
-        repo_decision_outcome / repo_recommendation / promotion_allowed — repo-level
-                       Phase 5 decision fields. These do not change the default backend.
-
-    Args:
-        preview_url:        Base URL of the preview deployment.
-        steps:              List of step dicts (action/url/selector/text).
-        screenshot_dir:     Directory for shot*.png; defaults to app/screenshots.
-        generation_context: Optional context dict from step generation.
-        test_case_id:       Phase 4: experiment test case identifier. Pass one of
-                            the FIXED_TEST_SUITE ids (e.g. "tc_01_semantic_button")
-                            to trigger artifact persistence.
-
-    Returns:
-        Dict with steps_succeeded, steps_failed, failure_reason, success, debug,
-        backend, mode, test_case_id, final_outcome, benchmark_outcome,
-        benchmark_has_paired_baseline, repo_decision_outcome,
-        repo_recommendation, decision_outcome, promotion_allowed, default_backend.
-    """
     if not preview_url:
         raise ValueError("preview_url cannot be None or empty")
     steps = steps or DEFAULT_STEPS
@@ -226,14 +291,19 @@ def run_capture(
         _EXPERIMENT_MODE if BROWSER_BACKEND == "agent_browser_cli" else "playwright"
     )
 
-    # ------------------------------------------------------------------
-    # Phase 3 / Phase 4 — Agent Browser experiment path
-    # ------------------------------------------------------------------
+
+
+
     if BROWSER_BACKEND == "agent_browser_cli":
+        _objective = {
+            "goal": "Recover missing prerequisite interactions from current DOM",
+            "generation_context": generation_context or {},
+        }
         _runner_result = run_ab_stepwise(
             preview_url=preview_url,
             initial_steps=steps,
             screenshot_dir=out_dir,
+            objective=_objective,
             capture_settings=capture_settings,
             mode=_EXPERIMENT_MODE,
         )
@@ -244,6 +314,7 @@ def run_capture(
                 "steps_failed": int(_runner_result.get("steps_failed", 0)),
                 "failure_reason": None,
                 "success": True,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
         else:
@@ -252,12 +323,13 @@ def run_capture(
                 "steps_failed": 1,
                 "failure_reason": _runner_result.get("failure_reason") or "ab_execution_failed",
                 "success": False,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
 
-    # ------------------------------------------------------------------
-    # Default — existing Playwright stepwise path (unchanged)
-    # ------------------------------------------------------------------
+
+
+
     else:
         _objective = {
             "goal": "Generate reliable demo actions from current DOM only",
@@ -278,6 +350,7 @@ def run_capture(
                 "steps_failed": int(_runner_result.get("steps_failed", 0)),
                 "failure_reason": None,
                 "success": True,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
         else:
@@ -286,12 +359,30 @@ def run_capture(
                 "steps_failed": 1,
                 "failure_reason": _runner_result.get("failure_reason") or "stepwise_execution_failed",
                 "success": False,
+                "approved_frames": _runner_result.get("approved_frames", []),
                 "debug": {"engine": _engine, "results": _runner_result.get("results", [])},
             }
 
-    # ------------------------------------------------------------------
-    # Phase 4 — Experiment metadata (appended to all return paths)
-    # ------------------------------------------------------------------
+    approved_frames = list(_runner_result.get("approved_frames") or [])
+    render_approval = _build_render_approval(
+        generation_context=generation_context,
+        results=list(_runner_result.get("results") or []),
+        approved_frames=approved_frames,
+    )
+    if _result.get("success") and not approved_frames:
+        _result["success"] = False
+        _result["steps_failed"] = max(int(_result.get("steps_failed", 0)), 1)
+        _result["failure_reason"] = "no_validated_frames"
+    if _result.get("success") and not render_approval.get("is_sendable", False):
+        _result["success"] = False
+        _result["steps_failed"] = max(int(_result.get("steps_failed", 0)), 1)
+        _result["failure_reason"] = ",".join(render_approval.get("reasons") or ["render_not_sendable"])
+    _result["approved_frames"] = approved_frames
+    _result["render_approval"] = render_approval
+
+
+
+
     _result["backend"] = BROWSER_BACKEND
     _result["mode"] = _active_mode
     _result["test_case_id"] = test_case_id
@@ -304,7 +395,7 @@ def run_capture(
     _result["promotion_allowed"] = False
     _result["default_backend"] = _DEFAULT_BACKEND
 
-    # Persist experiment artifacts when a test_case_id is provided.
+
     if test_case_id:
         from app.browser.experiment_logger import ExperimentLogger, summarize_artifacts
         _logger = ExperimentLogger(

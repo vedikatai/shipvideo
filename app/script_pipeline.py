@@ -1,17 +1,3 @@
-"""
-Script-first pipeline: generates a full Playwright Python script from the
-suggested_demo_flow narrative, executes it with continuous video recording,
-and converts the output .webm to .mp4.
-
-Retry model:
-- Up to MAX_SCRIPT_RETRIES attempts per run.
-- On execution failure: script + error context are fed back to the LLM for repair.
-- After MAX_SCRIPT_RETRIES exhausted: raises ScriptPipelineError for the caller
-  to catch and fall back to the stepwise pipeline.
-
-This module is completely independent of the stepwise pipeline and can be called
-and tested in isolation.
-"""
 from __future__ import annotations
 
 import json
@@ -27,7 +13,7 @@ SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
 
 
 class ScriptPipelineError(RuntimeError):
-    """Raised when the script-first pipeline fails unrecoverably."""
+    pass
 
 
 def _log(event: str, payload: Dict[str, Any]) -> None:
@@ -41,28 +27,6 @@ def run_script_pipeline(
     generation_context: Dict[str, Any],
     screenshot_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """
-    Execute the script-first recording pipeline.
-
-    Pulls everything it needs from `generation_context` (produced by
-    `generate_steps_from_diff`):
-      - suggested_demo_flow (narrative)
-      - dom_data
-      - app_hints
-      - diffs_for_prompt (diff file list)
-
-    Returns:
-        {
-            "success": bool,
-            "video_path": str,        # local .mp4 path on success
-            "pipeline": "script",
-            "attempts": int,
-            "error": str | None,
-        }
-
-    Raises:
-        ScriptPipelineError: all retries exhausted without success.
-    """
     out_dir = screenshot_dir or SCREENSHOT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,10 +53,10 @@ def run_script_pipeline(
     previous_script: Optional[str] = None
     previous_error: Optional[str] = None
 
-    for attempt in range(1, MAX_SCRIPT_RETRIES + 2):  # +2 so last attempt is attempt N
+    for attempt in range(1, MAX_SCRIPT_RETRIES + 2):                                   
         _log("script_pipeline.attempt", {"attempt": attempt, "max": MAX_SCRIPT_RETRIES + 1})
 
-        # Generate (or repair) the script
+
         try:
             script = generate_playwright_script(
                 suggested_demo_flow=suggested_demo_flow,
@@ -107,7 +71,7 @@ def run_script_pipeline(
             _log("script_pipeline.generation_failed", {"attempt": attempt, "error": str(e)})
             raise ScriptPipelineError(f"Script generation failed: {e}") from e
 
-        # Execute the script with video recording
+
         result = run_script(
             script=script,
             base_url=preview_url,
@@ -118,7 +82,7 @@ def run_script_pipeline(
             webm_path = Path(result["webm_path"])
             _log("script_pipeline.execution_success", {"attempt": attempt, "webm": str(webm_path)})
 
-            # Convert webm → mp4
+
             mp4_path = convert_webm_to_mp4(webm_path, out_dir)
             _log("script_pipeline.video_ready", {"mp4": str(mp4_path)})
             return {
@@ -129,7 +93,7 @@ def run_script_pipeline(
                 "error": None,
             }
 
-        # Execution failed — prepare for retry if retries remain
+
         previous_error = result.get("error") or "execution_failed"
         previous_script = script
         _log(

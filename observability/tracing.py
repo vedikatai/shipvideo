@@ -1,9 +1,3 @@
-"""
-OpenTelemetry tracing setup for MVP: BatchSpanProcessor + NoOpExporter (no console spam).
-Spans flow through the processor so swapping to Jaeger/OTLP later works.
-Readable step logs are printed by the decorator. Step timings use ContextVar for async safety.
-Business logic must not import OpenTelemetry directly; use get_tracer() from this module.
-"""
 import contextvars
 from contextlib import contextmanager
 from typing import List, Optional, Tuple
@@ -21,7 +15,6 @@ SERVICE_NAME = "shipvideo-engine"
 
 
 class _NoOpSpanExporter(SpanExporter):
-    """Exporter that discards spans. Keeps the processor pipeline active for future Jaeger/OTLP/etc."""
 
     def export(self, spans):
         return SpanExportResult.SUCCESS
@@ -33,7 +26,7 @@ class _NoOpSpanExporter(SpanExporter):
         return True
 
 
-# ContextVar isolates step timings per async context / task; safe with workers and overlapping runs.
+
 _step_timings: contextvars.ContextVar[Optional[List[Tuple[str, float]]]] = contextvars.ContextVar(
     "pipeline_step_timings", default=None
 )
@@ -56,25 +49,24 @@ def record_step_timing(step_name: str, duration_ms: float) -> None:
 
 
 def _print_pipeline_summary() -> None:
-    """Print timing table and clear; idempotent (second call no-ops)."""
     lst = _step_timings.get()
     if not lst:
         return
     print("", flush=True)
     print("PIPELINE SUMMARY", flush=True)
     total_ms = 0.0
-    # Simple ANSI colors for human-readable timing:
-    # - green: fast/OK
-    # - red: very slow
+
+
+
     GREEN = "\033[32m"
     RED = "\033[31m"
     RESET = "\033[0m"
 
-    # thresholds in milliseconds
-    SLOW_THRESHOLD_MS = 5000.0  # 5s and above = red
 
-    # Some steps are composite wrappers (they already include the time of nested steps),
-    # so we don't want to count them again in the TOTAL to avoid double-counting.
+    SLOW_THRESHOLD_MS = 5000.0                      
+
+
+
     COMPOSITE_STEPS = {"analyze_pr", "video_pipeline"}
 
     for name, ms in lst:
@@ -91,7 +83,7 @@ def _print_pipeline_summary() -> None:
             line = f"{name:<22} {ms:.1f} ms"
         print(f"{color}{line}{RESET}", flush=True)
 
-    # TOTAL line: use red if total is very large, green otherwise
+
     total_color = RED if total_ms >= SLOW_THRESHOLD_MS else GREEN
     if total_ms >= 1000:
         total_line = f"{'TOTAL':<22} {total_ms / 1000:.1f} s"
@@ -103,16 +95,10 @@ def _print_pipeline_summary() -> None:
 
 
 def print_pipeline_summary() -> None:
-    """Public: print pipeline timing summary if any. Safe to call from finally (e.g. on crash)."""
     _print_pipeline_summary()
 
 
 def init_tracing() -> None:
-    """
-    Configure OpenTelemetry tracer provider with BatchSpanProcessor(NoOpExporter).
-    Spans are processed but not sent anywhere; swap NoOpExporter for Jaeger/OTLP later.
-    Call once during application startup.
-    """
     global _TRACER_PROVIDER, _TRACER
     if _TRACER_PROVIDER is not None:
         return
@@ -125,7 +111,6 @@ def init_tracing() -> None:
 
 
 def get_tracer() -> trace.Tracer:
-    """Return the application tracer. Call init_tracing() first (e.g. at startup)."""
     if _TRACER is None:
         init_tracing()
     assert _TRACER is not None
@@ -133,20 +118,48 @@ def get_tracer() -> trace.Tracer:
 
 
 def set_current_span_error(message: str) -> None:
-    """Set the current span's status to ERROR. Use from business logic instead of importing OpenTelemetry."""
     span = trace.get_current_span()
     if span.is_recording():
         span.set_status(Status(StatusCode.ERROR, message))
 
 
+def record_contract_integrity_error(
+    *,
+    stage: str,
+    reason: str,
+    contract_id: str = "",
+    missing_targets: Optional[List[str]] = None,
+) -> None:
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    span.set_attribute("contract_integrity.stage", stage[:256])
+    span.set_attribute("contract_integrity.reason", reason[:512])
+    if contract_id:
+        span.set_attribute("contract_integrity.contract_id", contract_id[:64])
+    if missing_targets:
+        joined = ",".join(missing_targets)[:1024]
+        span.set_attribute("contract_integrity.missing_targets", joined)
+
+
+def record_agent_browser_diagnostics(
+    *,
+    console_count: int = 0,
+    page_error_count: int = 0,
+    network_request_count: int = 0,
+    network_error_count: int = 0,
+) -> None:
+    span = trace.get_current_span()
+    if not span.is_recording():
+        return
+    span.set_attribute("agent_browser.console_count", int(console_count))
+    span.set_attribute("agent_browser.page_error_count", int(page_error_count))
+    span.set_attribute("agent_browser.network_request_count", int(network_request_count))
+    span.set_attribute("agent_browser.network_error_count", int(network_error_count))
+
+
 @contextmanager
 def pipeline_run_span():
-    """
-    Context manager for the root pipeline_run span. Sets ContextVar to a new list on enter,
-    starts the span, and on exit prints the pipeline summary (if any).
-    Webhook should also call print_pipeline_summary() in a finally block so the summary
-    is printed even if the context manager exit is skipped (e.g. on crash).
-    """
     _step_timings.set([])
     tracer = get_tracer()
     try:

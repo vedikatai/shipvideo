@@ -1,11 +1,13 @@
+
+
 import re
 from typing import Any, Dict, List, Optional, Set
 
 
 VALID_ACTIONS = {"goto", "click", "screenshot", "assert_terminal"}
 
-# Validation metadata fields that must survive normalization intact.
-# These are consumed by the AB runner to validate post-click page state.
+
+
 _PASSTHROUGH_FIELDS = (
     "success_condition",
     "validation_condition",
@@ -17,19 +19,10 @@ _PASSTHROUGH_FIELDS = (
 
 
 def _normalize_selector_quotes(selector: str) -> str:
-    """Normalize attribute selector to single-quote form for consistent set membership.
-
-    The crawler generates selectors with single quotes: [data-testid='x'].
-    The LLM may output double quotes: [data-testid="x"].
-    Without normalization, validate_against_dom rejects perfectly valid steps.
-    """
     return re.sub(r'\[(\w[\w-]*)\s*=\s*"([^"]+)"\]', r"[\1='\2']", selector)
 
 
 def validate_steps(steps: Any) -> List[Dict[str, Any]]:
-    """
-    Keep only steps with a known action to avoid executor crashes.
-    """
     if not isinstance(steps, list):
         return []
 
@@ -44,44 +37,55 @@ def validate_steps(steps: Any) -> List[Dict[str, Any]]:
 
 
 def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Normalize heterogeneous LLM step shapes into the minimal executor format.
-    """
     normalized: List[Dict[str, Any]] = []
 
     for step in steps:
         action = step.get("action")
 
         if action == "click":
-            selector = (step.get("selector") or step.get("element") or step.get("target") or "").strip()
+            selector = (
+                step.get("selector")
+                or step.get("element")
+                or step.get("target")
+                or ""
+            ).strip()
             label = (step.get("label") or "").strip()
             text = (step.get("text") or "").strip()
 
-            base: Dict[str, Any] = {}
             if label:
-                base = {"action": "click", "label": label}
+                base: Dict[str, Any] = {"action": "click", "label": label}
             elif text:
                 base = {"action": "click", "label": text}
             elif selector:
                 base = {"action": "click", "selector": selector}
+            else:
 
-            if base:
-                # Preserve validation metadata so the AB runner can validate
-                # post-click page state. Without this, every click is unvalidated.
-                for field in _PASSTHROUGH_FIELDS:
-                    val = step.get(field)
-                    if val is not None:
-                        base[field] = val
-                normalized.append(base)
+                print(
+                    "[step_normalizer] dropped click step: "
+                    "no label, text, or selector found",
+                    flush=True,
+                )
+                continue
+
+
+
+            for field in _PASSTHROUGH_FIELDS:
+                val = step.get(field)
+                if val is not None:
+                    base[field] = val
+
+
+            for field in ("dom_confirmed", "match_confidence",
+                          "dom_warning", "contract_missing"):
+                val = step.get(field)
+                if val is not None:
+                    base[field] = val
+
+            normalized.append(base)
 
         elif action == "goto":
             url = (step.get("url", "/") or "/").strip()
-            normalized.append(
-                {
-                    "action": "goto",
-                    "url": url,
-                }
-            )
+            normalized.append({"action": "goto", "url": url})
 
         elif action == "screenshot":
             normalized.append(
@@ -92,9 +96,14 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             )
 
         elif action == "assert_terminal":
-            # Preserve all terminal assertion fields as-is.
+
             terminal_step: Dict[str, Any] = {"action": "assert_terminal"}
-            for field in ("condition", "expected_url", "expected_text", "expected_element"):
+            for field in (
+                "condition",
+                "expected_url",
+                "expected_text",
+                "expected_element",
+            ):
                 val = step.get(field)
                 if val is not None:
                     terminal_step[field] = val
@@ -104,17 +113,11 @@ def normalize_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
-    """
-    Derive likely URL routes from changed file paths.
-
-    This is a best-effort heuristic so "new routes" added by the PR are not
-    rejected just because the homepage crawl didn't include them.
-    """
     routes: Set[str] = set()
     for f in diff_files:
         path = f.get("path", "")
 
-        # Next.js app router: app/foo/bar/page.[jt]sx? -> /foo/bar
+
         m = re.match(r"(?:src/)?app/(.+)/page\.[jt]sx?$", path)
         if m:
             route = "/" + m.group(1)
@@ -122,7 +125,7 @@ def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
             routes.add(route)
             continue
 
-        # Next.js pages router: pages/foo/[id].tsx -> /foo/[id]
+
         m = re.match(r"(?:src/)?pages/(.+)\.[jt]sx?$", path)
         if m:
             slug = m.group(1)
@@ -133,28 +136,22 @@ def _extract_routes_from_diff(diff_files: List[Dict[str, str]]) -> Set[str]:
 
     return routes
 
-
 def validate_against_dom(
     steps: List[Dict[str, Any]],
     dom_data: Dict[str, Any],
     diff_files: Optional[List[Dict[str, str]]] = None,
     *,
     allowed_routes_override: Optional[Set[str]] = None,
+    contract: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Hard-reject steps whose targets don't exist in the live DOM snapshot.
 
-    - goto  → URL must appear in crawled routes/links OR be derivable from diff
-    - click → selector must match a known selector OR visible text must match
-    - screenshot → always passes
-    """
-    # Build sets of valid targets from the DOM crawl.
+
+
+
     valid_routes: Set[str] = set(dom_data.get("routes") or ["/"])
     valid_routes.add("/")
 
     if allowed_routes_override:
-        # In "route override" mode we restrict routes to the chosen one(s) so
-        # the model can't wander.
         valid_routes = set(allowed_routes_override) | {"/"}
 
     valid_selectors: Set[str] = set()
@@ -164,6 +161,7 @@ def validate_against_dom(
         sel = (btn.get("selector") or "").strip()
         if sel:
             valid_selectors.add(sel)
+
         txt = (btn.get("text") or "").strip()
         if txt:
             valid_texts.add(txt)
@@ -172,11 +170,11 @@ def validate_against_dom(
         href = (link.get("href") or "").strip()
         if href:
             valid_routes.add(href)
+
         txt = (link.get("text") or "").strip()
         if txt:
             valid_texts.add(txt)
 
-    # data_testids: dom_crawler returns objects like {testid, tag, text}
     for tid in dom_data.get("data_testids") or []:
         testid = (tid.get("testid") or "").strip()
         if testid:
@@ -185,19 +183,46 @@ def validate_against_dom(
     if diff_files:
         inferred = _extract_routes_from_diff(diff_files)
         if allowed_routes_override:
-            # When restricting routes (route override), don't widen the valid
-            # set with unrelated inferred routes.
-            valid_routes |= (inferred & valid_routes)
+            valid_routes |= inferred & valid_routes
         else:
             valid_routes |= inferred
 
+
+    valid_texts_lower = {t.lower() for t in valid_texts}
+    required_labels: Set[str] = set()
+
+
+
+
+    if contract is not None:
+        try:
+            for target in contract.targets or []:
+                lbl = (target.label or "").strip()
+                if lbl:
+                    valid_texts.add(lbl)
+                    valid_texts_lower.add(lbl.lower())
+                    if getattr(target, "required", True):
+                        required_labels.add(lbl.lower())
+        except Exception:
+            pass
+
+
+
+
     accepted: List[Dict[str, Any]] = []
+
     for step in steps:
         action = step.get("action")
 
-        if action == "screenshot":
+
+
+
+        if action in {"screenshot", "assert_terminal"}:
             accepted.append(step)
             continue
+
+
+
 
         if action == "goto":
             url = (step.get("url") or "").strip()
@@ -205,29 +230,79 @@ def validate_against_dom(
                 accepted.append(step)
             else:
                 print(
-                    f"[step-validator] rejected goto url={url!r} (not in valid_routes)",
+                    f"[step-validator] rejected goto url={url!r} "
+                    f"(not in valid_routes)",
                     flush=True,
                 )
             continue
+
+
+
 
         if action == "click":
             selector = (step.get("selector") or "").strip()
-            # Normalize quote style before set lookup so [data-testid="x"]
-            # matches the single-quote form stored by _short_selector.
             selector_norm = _normalize_selector_quotes(selector) if selector else ""
+
             label = (step.get("label") or step.get("text") or "").strip()
-            if (selector_norm and selector_norm in valid_selectors) or (label and label in valid_texts):
-                accepted.append(step)
+            label_lower = label.lower()
+
+            if selector_norm and selector_norm in valid_selectors:
+                annotated = {
+                    **step,
+                    "dom_confirmed": True,
+                    "match_confidence": "exact",
+                }
+
+            elif label and label in valid_texts:
+                annotated = {
+                    **step,
+                    "dom_confirmed": True,
+                    "match_confidence": "exact",
+                }
+
+            elif label_lower and label_lower in valid_texts_lower:
+                annotated = {
+                    **step,
+                    "dom_confirmed": True,
+                    "match_confidence": "high",
+                }
+
+            elif label_lower and any(
+                label_lower in t or t in label_lower
+                for t in valid_texts_lower
+                if len(t) > 3 and len(label_lower) > 3
+            ):
+                annotated = {
+                    **step,
+                    "dom_confirmed": True,
+                    "match_confidence": "low",
+                }
+
             else:
+                is_contract_target = label_lower in required_labels
+                if is_contract_target:
+                    annotated = {
+                        **step,
+                        "dom_confirmed": False,
+                        "match_confidence": "none",
+                        "contract_missing": True,
+                        "dom_warning": f"Required contract target '{label}' not found in crawled DOM",
+                    }
+                    accepted.append(annotated)
+                    continue
                 print(
-                    "[step-validator] rejected click "
-                    f"selector={selector!r} label={label!r} (not in live DOM)",
+                    f"[step-validator] dropping unconfirmed non-contract click "
+                    f"label={label!r} selector={selector!r}",
                     flush=True,
                 )
+                continue
+
+            accepted.append(annotated)
             continue
 
-        # Unknown action: keep; validate_steps later will drop it.
+
+
+
         accepted.append(step)
 
     return accepted
-

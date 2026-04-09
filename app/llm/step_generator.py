@@ -2,15 +2,34 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Tuple
+import asyncio
+from typing import Any, Dict, List, Tuple, Optional
 
 from app.llm_guards import record_spend
 
 try:
-    from openai import OpenAI, BadRequestError  # type: ignore
+    from openai import OpenAI, BadRequestError                
 except Exception:
-    OpenAI = None  # type: ignore
-    BadRequestError = Exception  # type: ignore
+    OpenAI = None                
+    BadRequestError = Exception                
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "__dict__"):
+        data = {
+            key: _json_safe(val)
+            for key, val in vars(value).items()
+            if not key.startswith("_")
+        }
+        data["_type"] = value.__class__.__name__
+        return data
+    return str(value)
 
 
 def _get_client() -> Any:
@@ -31,11 +50,6 @@ def _call_with_fallback(
     max_completion_tokens: int,
     schema: Dict[str, Any],
 ) -> Tuple[Any, Dict[str, Any]]:
-    """
-    Call the Azure OpenAI deployment with json_schema mode; fall back to json_object
-    if the deployment does not support json_schema (older Azure versions raise BadRequestError).
-    Returns (completion, parsed_data).
-    """
     try:
         completion = client.chat.completions.create(
             model=deployment,
@@ -85,11 +99,6 @@ def generate_next_steps(
     previous_error: Dict[str, Any] | None = None,
     max_steps: int = 2,
 ) -> List[Dict[str, Any]]:
-    """
-    Generate only NEXT step(s) from current DOM (re-anchored model).
-    Strict contract:
-      {"steps":[{"action":"click|goto|screenshot","selector":"","text":"","url":"","label":"","reasoning":""}]}
-    """
     deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
     if not deployment:
         raise RuntimeError("AZURE_OPENAI_DEPLOYMENT must be set")
@@ -124,8 +133,8 @@ def generate_next_steps(
         },
     }
 
-    # Build a compact, human-readable action menu from the live DOM so the model
-    # has a concrete list to pick from rather than guessing.
+
+
     available_buttons = [
         {"text": (b.get("text") or "").strip(), "testid": (b.get("testid") or "").strip(), "aria": (b.get("aria") or "").strip(), "id": (b.get("id") or "").strip()}
         for b in (dom_context.get("buttons") or [])
@@ -168,7 +177,7 @@ def generate_next_steps(
     }
     messages = [
         {"role": "system", "content": system_msg},
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps(_json_safe(payload), ensure_ascii=False)},
     ]
     client = _get_client()
     completion, data = _call_with_fallback(client, deployment, messages, 700, schema)
@@ -183,3 +192,164 @@ def generate_next_steps(
         raise RuntimeError("generate_next_steps: LLM returned empty steps via both response_format modes")
     return steps
 
+
+def generate_single_step_toward_testid(
+    *,
+    target_testid: str,
+    snapshot: Dict[str, Any],
+    objective: Dict[str, Any],
+    previous_error: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    if not deployment:
+        raise RuntimeError("AZURE_OPENAI_DEPLOYMENT must be set")
+
+    schema = {
+        "name": "single_step_toward_testid",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["goto", "click"]},
+                        "selector": {"type": "string"},
+                        "text": {"type": "string"},
+                        "url": {"type": "string"},
+                        "label": {"type": "string"},
+                        "reasoning": {"type": "string"},
+                    },
+                    "required": ["action", "selector", "text", "url", "label", "reasoning"],
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["step"],
+            "additionalProperties": False,
+        },
+    }
+
+    system_msg = (
+        "You are navigating toward one specific changed UI target.\n"
+        "Choose exactly one next action from the CURRENT browser evidence.\n"
+        "Return one action only.\n"
+        "Never invent routes, labels, or selectors.\n"
+        "If you choose click, it must target a currently visible interactive element.\n"
+        "If an element has a testid in the snapshot, prefer selector=\"[data-testid='x']\".\n"
+        "If an element has an aria label in the snapshot, prefer selector=\"[aria-label='x']\".\n"
+        "Otherwise use label with exact visible text from the snapshot.\n"
+        "Choose the single action most likely to make the target testid visible next."
+    )
+    payload = {
+        "objective": objective,
+        "target_testid": target_testid,
+        "current_url": snapshot.get("current_url", ""),
+        "current_path": snapshot.get("current_path", "/"),
+        "headings": snapshot.get("headings", []),
+        "active_surfaces": snapshot.get("active_surfaces", []),
+        "interactive_elements": snapshot.get("interactive_elements", []),
+        "previous_error": previous_error or {},
+    }
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": json.dumps(_json_safe(payload), ensure_ascii=False)},
+    ]
+    client = _get_client()
+    completion, data = _call_with_fallback(client, deployment, messages, 400, schema)
+
+    usage = getattr(completion, "usage", None)
+    pt = getattr(usage, "prompt_tokens", 0) or 0
+    ct = getattr(usage, "completion_tokens", 0) or 0
+    record_spend(pt, ct)
+
+    step = data.get("step") or {}
+    if not step:
+        raise RuntimeError("generate_single_step_toward_testid: empty step")
+    return step
+
+
+def _call_llm_simple(prompt: str) -> str:
+    deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+    if not deployment:
+        return ""
+    try:
+        client = _get_client()
+        completion = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": prompt}],
+            max_completion_tokens=120,
+            response_format={"type": "text"},
+        )
+        usage = getattr(completion, "usage", None)
+        pt = getattr(usage, "prompt_tokens", 0) or 0
+        ct = getattr(usage, "completion_tokens", 0) or 0
+        record_spend(pt, ct)
+        return str(completion.choices[0].message.content or "")
+    except Exception:
+        return ""
+
+
+async def find_ref_with_llm(
+    *,
+    intent: str,
+    interactive_elements: List[Dict[str, Any]],
+    context_elements: List[Dict[str, Any]] | None = None,
+) -> Optional[str]:
+    if not intent or not interactive_elements:
+        return None
+
+    compact_interactive = [
+        {"ref": str(e.get("ref") or ""), "role": str(e.get("role") or ""), "name": str(e.get("name") or "")}
+        for e in interactive_elements
+        if str(e.get("ref") or "").strip()
+    ]
+    if not compact_interactive:
+        return None
+
+    elements_text = "\n".join(
+        [
+            f"ref={el.get('ref')} role={el.get('role')} name={el.get('name')}"
+            for el in compact_interactive
+        ]
+    )
+    prompt = f"""
+You are selecting a UI element to click.
+
+Intent: "{intent}"
+
+Available interactive elements:
+{elements_text}
+
+Return only the ref string (e.g. "e10") of the best matching element.
+If no element matches the intent, return "none".
+No prose. No explanation. Just the ref or "none".
+"""
+    response = _call_llm_simple(prompt)
+    ref = (response or "").strip().strip('"').strip("'")
+    if not ref or ref.lower() == "none":
+        return None
+    if not ref.startswith("@"):
+        ref = f"@{ref}"
+    valid_refs = {str(e.get("ref") or "").strip() for e in compact_interactive}
+    if ref in valid_refs:
+        return ref
+    return None
+
+
+def find_ref_with_llm_sync(
+    *,
+    intent: str,
+    interactive_elements: List[Dict[str, Any]],
+    context_elements: List[Dict[str, Any]] | None = None,
+) -> str:
+    try:
+        return asyncio.run(
+            find_ref_with_llm(
+                intent=intent,
+                interactive_elements=interactive_elements,
+                context_elements=context_elements,
+            )
+        ) or ""
+    except RuntimeError:
+
+        return ""

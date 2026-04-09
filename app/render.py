@@ -1,6 +1,6 @@
 import subprocess
 from pathlib import Path
-import glob
+from typing import Iterable, List, Optional
 from observability import pipeline_step
 from app.config_types import load_capture_settings
 
@@ -8,37 +8,50 @@ BASE_APP_DIR = Path(__file__).resolve().parent
 SCREENSHOT_DIR = BASE_APP_DIR / "screenshots"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Suppress ffmpeg progress/codec spam; only real errors will be shown via -loglevel error
+
 FFMPEG_LOGLEVEL = "-loglevel", "error"
 
 
 @pipeline_step("render")
-def render_video():
-    """Create a video from screenshots. Dynamically finds all shot*.png files in order."""
+def render_video(
+    approved_frames: Optional[Iterable[str | Path]] = None,
+    *,
+    render_approval: Optional[dict] = None,
+):
     output_path = SCREENSHOT_DIR / "out.mp4"
 
     cs = load_capture_settings()
     W = cs.viewport_width
     H = cs.viewport_height
 
-    # Find all screenshot files in order (shot1.png, shot2.png, shot3.png, etc.)
-    shot_files = sorted(glob.glob(str(SCREENSHOT_DIR / "shot*.png")))
+    shot_files: List[str] = []
+    for frame in approved_frames or []:
+        path = Path(frame)
+        if path.exists():
+            shot_files.append(str(path))
+
+    approval = render_approval or {}
+    if approval and not bool(approval.get("is_sendable")):
+        raise RuntimeError(
+            "Render aborted because video approval is not sendable: "
+            f"{approval.get('reasons') or ['unknown']}"
+        )
 
     if not shot_files:
-        raise FileNotFoundError("No screenshot files found (shot*.png)")
+        raise FileNotFoundError("No approved screenshot frames provided for render")
 
     print(f"[render] screenshots={len(shot_files)} viewport={W}x{H}", flush=True)
 
-    # scale+pad template: shrink to fit, then pad with black to exact viewport size.
-    # This normalises full-page screenshots (variable height) to a fixed canvas.
+
+
     scale_pad = (
         f"scale={W}:{H}:force_original_aspect_ratio=decrease,"
         f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2"
     )
 
-    # Build FFmpeg command dynamically based on number of screenshots
+
     if len(shot_files) == 1:
-        # Single screenshot: normalise then loop
+
         shot_path = shot_files[0]
         cmd = [
             "ffmpeg", "-y",
@@ -54,11 +67,11 @@ def render_video():
             str(output_path),
         ]
     else:
-        # Multiple screenshots: scale+pad each input, then concat
+
         input_args = []
         for shot in shot_files:
             input_args.extend(["-loop", "1", "-t", "3", "-i", str(shot)])
-        # Build per-input scale+pad filter chains, then concat normalised streams
+
         filter_chains = "".join(
             f"[{i}:v]{scale_pad}[v{i}];" for i in range(len(shot_files))
         )

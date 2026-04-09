@@ -1,48 +1,3 @@
-"""
-Deterministic ref-selection policy — Phase 2 / Phase 3.
-
-Implements the decision layer for the Agent Browser accuracy experiment.
-Given a natural-language intent (e.g. "Generate API Key") and a normalized
-AgentBrowserSnapshot from Phase 1, this module returns a structured
-SelectionResult identifying which ref (@e1, @e2, …) should be clicked and why.
-
-Public API:
-    select_ref(intent, snapshot, *, mode, role_filter) -> SelectionResult
-
-Selection waterfall (deterministic, Mode A):
-    1. Exact name match            — element.name == intent  (case-sensitive)
-    2. Case-insensitive exact match — element.name.lower() == intent.lower()
-    3. Partial match               — intent ⊆ element.name or
-                                     element.name ⊆ intent  (case-insensitive)
-    At every level:
-        - Exactly 1 match  → return that ref with the corresponding reason.
-        - 2+ matches       → return "ambiguous" immediately; do not guess.
-        - 0 matches        → fall through to the next level.
-    If all levels are exhausted with no candidate → return "no_match".
-
-Experiment modes:
-    Mode A — "deterministic"
-        Runs only the deterministic waterfall above.
-        REQUIRED for all baseline comparison runs.
-
-    Mode B — "deterministic_plus_llm"
-        Intended to run the deterministic waterfall first, then fall back to
-        an LLM call when no deterministic match is found.
-        LLM fallback is NOT YET WIRED in Phase 2 (app/llm/step_generator.py
-        is left unchanged). Calling select_ref in Mode B returns the
-        deterministic result and logs a clear warning so that Mode B results
-        are never silently mixed with Mode A baseline data.
-
-Design constraints (Phase 2):
-    - No writes to any execution file (step_runner, step_execution unchanged).
-    - No modifications to the LLM planner (step_generator unchanged).
-    - No production code path is altered.
-
-Phase 3 addition:
-    derive_intent(step) — converts a standard step dict (the planner output
-    format) into a string intent for select_ref(). This is the explicit
-    "connect planning to execution" bridge required by the Phase 3 spec.
-"""
 from __future__ import annotations
 
 import re
@@ -52,12 +7,11 @@ from app.browser.agent_browser_types import RefCandidate, SelectionResult
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot, ExperimentMode
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+
+
+
 
 def _make_candidate(element: AgentBrowserElement, match_type: str) -> RefCandidate:
-    """Build a RefCandidate from a normalized AgentBrowserElement."""
     return RefCandidate(
         ref=element["ref"],
         role=element["role"],
@@ -70,10 +24,6 @@ def _filter_by_role(
     elements: List[AgentBrowserElement],
     role_filter: Optional[List[str]],
 ) -> List[AgentBrowserElement]:
-    """
-    Return only elements whose role is in role_filter (case-insensitive).
-    If role_filter is None or empty, return all elements unchanged.
-    """
     if not role_filter:
         return elements
     allowed = {r.lower() for r in role_filter}
@@ -81,7 +31,6 @@ def _filter_by_role(
 
 
 def _log_result(result: SelectionResult) -> None:
-    """Emit a structured log line for every selection outcome."""
     print(
         f"[ref_selector] "
         f"intent={result['intent']!r} "
@@ -93,77 +42,33 @@ def _log_result(result: SelectionResult) -> None:
     )
 
 
-def _apply_mode(result: SelectionResult, mode: ExperimentMode) -> SelectionResult:
-    """
-    Apply mode-specific behavior after the deterministic waterfall completes.
-
-    Mode A ("deterministic"):
-        Returns the result unchanged. This is the baseline path.
-
-    Mode B ("deterministic_plus_llm"):
-        LLM fallback is not yet wired in Phase 2. The deterministic result is
-        returned unchanged AND a clear warning is printed so that any run in
-        Mode B is immediately visible in logs and can never be silently treated
-        as a Mode A baseline data point.
-
-        Phase 3 will wire the LLM fallback here when no_match or ambiguous is
-        returned in Mode B.
-    """
-    if mode == "deterministic_plus_llm":
-        print(
-            "[ref_selector] WARNING mode=deterministic_plus_llm — "
-            "LLM fallback NOT YET WIRED (Phase 2 only implements deterministic). "
-            "Returning deterministic result. "
-            "This run MUST NOT be compared against Mode A baseline results.",
-            flush=True,
-        )
-    return result
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 — Planning-to-execution bridge
-# ---------------------------------------------------------------------------
 
-# Regex for extracting testid value from CSS selector strings like
-# [data-testid='generate-api-key'] or [data-testid="submit-btn"].
+
+
+
 _TESTID_RE = re.compile(r"""\[data-testid=['"]([^'"]+)['"]\]""")
-# First #id in a selector (e.g. #nested-lab-open-main, div#foo > span).
+
 _ID_FRAGMENT_RE = re.compile(r"#([\w-]+)")
 
 
 def _slug_to_intent(slug: str) -> str:
-    """Turn a testid or DOM id slug into words for fuzzy a11y name matching."""
     return slug.replace("-", " ").replace("_", " ").strip()
 
 
+def _candidate_texts(element: AgentBrowserElement) -> List[str]:
+    values = [
+        str(element.get("name") or "").strip(),
+        str(element.get("testid") or "").strip(),
+        str(element.get("aria_label") or "").strip(),
+        str(element.get("element_id") or "").strip(),
+        str(element.get("nearby_text") or "").strip(),
+    ]
+    return [value for value in values if value]
+
+
 def derive_intent(step: Dict[str, Any]) -> str:
-    """
-    Extract a ref-selection intent string from a standard step dict.
-
-    This is the explicit bridge between the planner output format and the
-    Agent Browser execution loop (Phase 3 spec: "connects planning to execution").
-
-    Decision priority:
-        1. step["label"]    — visible text written by the planner; ideal for
-                               agent-browser name matching.
-        2. step["text"]     — legacy visible text field; treated the same way.
-                               agent-browser name matching.
-        3. data-testid      — extracted from step["selector"] and converted to
-                               human-readable form ("generate-api-key" →
-                               "generate api key").
-        4. #id selector     — first `#foo-bar` fragment → "foo bar" for partial
-                               matching against accessible names.
-        5. ""               — intent cannot be derived; caller should treat
-                               this as a fatal step failure.
-
-    Args:
-        step — standard step dict from the planner:
-               {"action": "click", "text": "...", "selector": "...", ...}
-
-    Returns:
-        A non-empty intent string on success, or "" when no intent can be
-        derived from the step data.
-    """
     label = (step.get("label") or "").strip()
     if label:
         return label
@@ -179,15 +84,15 @@ def derive_intent(step: Dict[str, Any]) -> str:
             return _slug_to_intent(m.group(1))
         m_id = _ID_FRAGMENT_RE.search(selector)
         if m_id:
-            # "#nested-lab-open-main" → "nested lab open main"
+
             return _slug_to_intent(m_id.group(1))
 
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+
+
+
 
 def select_ref(
     intent: str,
@@ -195,42 +100,13 @@ def select_ref(
     *,
     mode: ExperimentMode = "deterministic",
     role_filter: Optional[List[str]] = None,
+    preferred_testids: Optional[List[str]] = None,
+    preferred_surface: str = "",
+    preferred_texts: Optional[List[str]] = None,
 ) -> SelectionResult:
-    """
-    Select the best ref from snapshot for the given intent string.
-
-    Runs the deterministic waterfall (exact → case-insensitive → partial),
-    declaring ambiguous at any level where multiple candidates match.
-
-    Args:
-        intent      — natural-language target description, e.g. "Generate API
-                      Key". Whitespace is stripped before comparison. An empty
-                      string after stripping returns "no_match" immediately.
-        snapshot    — normalized AgentBrowserSnapshot (from Phase 1 wrapper).
-        mode        — experiment mode. Always use "deterministic" for baseline
-                      comparison runs (Mode A). Pass "deterministic_plus_llm"
-                      only for Mode B experimental runs.
-        role_filter — optional ARIA role allowlist, e.g. ["button", "link"].
-                      When provided, only elements with a matching role are
-                      considered. None (default) searches all roles.
-
-    Returns:
-        SelectionResult with:
-            chosen_ref       — "@eN" on success; "" on ambiguous or no_match.
-            selection_reason — one of: "exact_match", "case_insensitive_match",
-                               "partial_match", "ambiguous", "no_match".
-            candidates       — elements considered at the deciding level.
-            intent           — the (stripped) intent string.
-            mode             — the experiment mode that produced this result.
-
-    Success criteria (from plan):
-        - Single exact match         → returns exact_match deterministically.
-        - Multiple partial matches   → returns ambiguous (never guesses).
-        - Zero matches at all levels → returns no_match cleanly.
-    """
     intent = (intent or "").strip()
 
-    # Guard: empty intent — cannot select anything.
+
     if not intent:
         result = SelectionResult(
             chosen_ref="",
@@ -242,12 +118,79 @@ def select_ref(
         _log_result(result)
         return result
 
-    # Selection is intentionally limited to normalized interactive elements only.
+
     pool = _filter_by_role(list(snapshot["interactive_elements"]), role_filter)
 
-    # ------------------------------------------------------------------
-    # Level 1 — Exact case-sensitive name match
-    # ------------------------------------------------------------------
+
+
+
+    preferred_testids_lower = {
+        str(testid).strip().lower()
+        for testid in (preferred_testids or [])
+        if str(testid).strip()
+    }
+    preferred_texts_lower = {
+        str(text).strip().lower()
+        for text in (preferred_texts or [])
+        if str(text).strip()
+    }
+    preferred_surface_lower = preferred_surface.strip().lower()
+
+    testid_exact: List[AgentBrowserElement] = [
+        e for e in pool
+        if str(e.get("testid") or "").strip().lower() == intent.lower()
+    ]
+    if len(testid_exact) == 1:
+        result = SelectionResult(
+            chosen_ref=testid_exact[0]["ref"],
+            selection_reason="testid_match",
+            candidates=[_make_candidate(testid_exact[0], "testid")],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+    if len(testid_exact) > 1:
+        result = SelectionResult(
+            chosen_ref="",
+            selection_reason="ambiguous",
+            candidates=[_make_candidate(e, "testid") for e in testid_exact],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+
+    aria_exact: List[AgentBrowserElement] = [
+        e for e in pool
+        if str(e.get("aria_label") or "").strip().lower() == intent.lower()
+    ]
+    if len(aria_exact) == 1:
+        result = SelectionResult(
+            chosen_ref=aria_exact[0]["ref"],
+            selection_reason="aria_match",
+            candidates=[_make_candidate(aria_exact[0], "aria")],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+
+    id_exact: List[AgentBrowserElement] = [
+        e for e in pool
+        if str(e.get("element_id") or "").strip().lower() == intent.lower()
+    ]
+    if len(id_exact) == 1:
+        result = SelectionResult(
+            chosen_ref=id_exact[0]["ref"],
+            selection_reason="id_match",
+            candidates=[_make_candidate(id_exact[0], "id")],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+
     exact: List[AgentBrowserElement] = [e for e in pool if e["name"] == intent]
 
     if len(exact) == 1:
@@ -259,7 +202,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     if len(exact) > 1:
         result = SelectionResult(
@@ -270,11 +213,11 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
-    # ------------------------------------------------------------------
-    # Level 2 — Case-insensitive exact name match
-    # ------------------------------------------------------------------
+
+
+
     intent_lower = intent.lower()
     ci: List[AgentBrowserElement] = [
         e for e in pool if e["name"].lower() == intent_lower
@@ -289,7 +232,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     if len(ci) > 1:
         result = SelectionResult(
@@ -300,11 +243,11 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
-    # ------------------------------------------------------------------
-    # Level 3 — Partial match (substring in either direction, case-insensitive)
-    # ------------------------------------------------------------------
+
+
+
     partial: List[AgentBrowserElement] = [
         e
         for e in pool
@@ -320,7 +263,7 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
     if len(partial) > 1:
         result = SelectionResult(
@@ -331,11 +274,59 @@ def select_ref(
             mode=mode,
         )
         _log_result(result)
-        return _apply_mode(result, mode)
+        return result
 
-    # ------------------------------------------------------------------
-    # No match at any level
-    # ------------------------------------------------------------------
+
+
+
+    scored_candidates: List[tuple[int, AgentBrowserElement, str]] = []
+    for element in pool:
+        score = 0
+        match_type = ""
+        for value in _candidate_texts(element):
+            value_lower = value.lower()
+            if value_lower == intent_lower:
+                score = max(score, 120)
+                match_type = match_type or "exact"
+            elif intent_lower and (intent_lower in value_lower or value_lower in intent_lower):
+                score = max(score, 75)
+                match_type = match_type or "partial"
+        if not score:
+            continue
+        if preferred_testids_lower and str(element.get("testid") or "").strip().lower() in preferred_testids_lower:
+            score += 25
+        if preferred_texts_lower and any(
+            preferred in text.lower() for preferred in preferred_texts_lower for text in _candidate_texts(element)
+        ):
+            score += 10
+        if preferred_surface_lower and preferred_surface_lower == str(element.get("surface") or "").strip().lower():
+            score += 15
+        scored_candidates.append((score, element, match_type or "scored"))
+
+    if scored_candidates:
+        scored_candidates.sort(key=lambda item: item[0], reverse=True)
+        top_score = scored_candidates[0][0]
+        top = [item for item in scored_candidates if item[0] == top_score]
+        if len(top) == 1:
+            result = SelectionResult(
+                chosen_ref=top[0][1]["ref"],
+                selection_reason="scored_match",
+                candidates=[_make_candidate(top[0][1], top[0][2])],
+                intent=intent,
+                mode=mode,
+            )
+            _log_result(result)
+            return result
+        result = SelectionResult(
+            chosen_ref="",
+            selection_reason="ambiguous",
+            candidates=[_make_candidate(item[1], item[2]) for item in top],
+            intent=intent,
+            mode=mode,
+        )
+        _log_result(result)
+        return result
+
     result = SelectionResult(
         chosen_ref="",
         selection_reason="no_match",

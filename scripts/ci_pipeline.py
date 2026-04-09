@@ -85,7 +85,7 @@ def main() -> None:
                     preview_url=preview_url,
                     steps=steps,
                     generation_context=generation_context,
-                    upload=False,  # CI: upload as workflow artifact instead of R2
+                    upload=False,                                                 
                 )
 
                 data_dir = REPO_ROOT / "data"
@@ -116,8 +116,8 @@ def main() -> None:
                 with open(summary_path, "w") as f:
                     json.dump(run_summary, f, indent=2)
 
-                # Post comment with best-effort URL (in CI, local path may not be useful).
-                # Workflow artifacts provide the real evidence.
+
+
                 comment_on_pr(
                     repo_full_name,
                     args.pr_number,

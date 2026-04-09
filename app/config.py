@@ -9,22 +9,10 @@ VALID_TRIGGER_MODES = {"auto", "on-demand", "smart"}
 
 
 class ConfigValidationError(Exception):
-    """Named exception for config validation failures.
-    Production code only logs; tests may catch this to assert validation behaviour."""
+    pass
 
 
 def validate_config(config: Dict[str, Any]) -> None:
-    """
-    Validate fields in project_config.json.
-
-    Logs a warning for each invalid value. Does NOT raise — a config typo
-    must never break the live webhook handler.
-
-    Checks:
-      - trigger.mode ∈ {auto, on-demand, smart}
-      - capture.viewport.width and .height are positive integers
-      - routeMap values are str or list[str]
-    """
     trigger = config.get("trigger") or {}
     mode = trigger.get("mode")
     if mode is not None and mode not in VALID_TRIGGER_MODES:
@@ -70,7 +58,6 @@ def validate_config(config: Dict[str, Any]) -> None:
 
 
 def load_config() -> Dict[str, Any]:
-    """Load and validate project configuration from project_config.json at repo root."""
     repo_root = Path(__file__).resolve().parent.parent
     config_path = repo_root / "project_config.json"
     with open(config_path) as f:

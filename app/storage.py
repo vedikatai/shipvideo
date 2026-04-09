@@ -31,17 +31,15 @@ def get_r2_client():
 
 
 def get_file_size_mb(file_path: Path) -> float:
-    """Get file size in MB."""
     return file_path.stat().st_size / (1024 * 1024)
 
 
 def list_videos(s3_client, bucket_name: str, prefix: str = "videos/") -> List[Tuple[str, datetime]]:
-    """List all videos in R2 bucket with their last modified dates."""
     videos = []
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
         pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
-        
+
         for page in pages:
             if "Contents" in page:
                 for obj in page["Contents"]:
@@ -51,41 +49,32 @@ def list_videos(s3_client, bucket_name: str, prefix: str = "videos/") -> List[Tu
                         videos.append((key, last_modified))
     except Exception as e:
         print(f"[upload] list videos failed: {e}", flush=True)
-    
-    return sorted(videos, key=lambda x: x[1], reverse=True)  # Newest first
+
+    return sorted(videos, key=lambda x: x[1], reverse=True)                
 
 
 def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
-    """
-    Clean up old videos to stay within free tier limits.
-    
-    Keeps:
-    - Most recent N videos (default: 50)
-    - Videos newer than max_age_days (default: 30)
-    
-    Deletes everything else.
-    """
     try:
         s3_client, bucket_name = get_r2_client()
         videos = list_videos(s3_client, bucket_name)
-        
+
         if not videos:
             return
-        
-        # Get timezone from first video if available, otherwise use UTC
+
+
         tz = videos[0][1].tzinfo if videos and videos[0][1].tzinfo else None
         cutoff_date = datetime.utcnow() - timedelta(days=max_age_days)
         if tz:
             cutoff_date = cutoff_date.replace(tzinfo=tz)
-        
+
         deleted_count = 0
         kept_count = 0
-        
+
         for i, (key, last_modified) in enumerate(videos):
-            # Keep the most recent N videos
+
             if i < max_videos:
-                # Also check age - delete even recent ones if too old
-                # Normalize both datetbdimes for comparison
+
+
                 last_mod_naive = last_modified.replace(tzinfo=None) if last_modified.tzinfo else last_modified
                 cutoff_naive = cutoff_date.replace(tzinfo=None) if cutoff_date.tzinfo else cutoff_date
                 if last_mod_naive < cutoff_naive:
@@ -98,7 +87,7 @@ def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
                 else:
                     kept_count += 1
             else:
-                # Delete everything beyond the limit
+
                 try:
                     s3_client.delete_object(Bucket=bucket_name, Key=key)
                     deleted_count += 1
@@ -116,22 +105,18 @@ def cleanup_old_videos(max_videos: int = 50, max_age_days: int = 30):
 
 
 def check_storage_usage() -> Tuple[int, float]:
-    """
-    Check current storage usage.
-    Returns: (video_count, total_size_mb)
-    """
     try:
         s3_client, bucket_name = get_r2_client()
         videos = list_videos(s3_client, bucket_name)
-        
+
         total_size = 0
         for key, _ in videos:
             try:
                 obj = s3_client.head_object(Bucket=bucket_name, Key=key)
-                total_size += obj.get("ContentLength", 0) / (1024 * 1024)  # MB
+                total_size += obj.get("ContentLength", 0) / (1024 * 1024)      
             except:
                 pass
-        
+
         return len(videos), total_size
     except Exception as e:
         print(f"[upload] check storage usage failed: {e}", flush=True)
@@ -140,18 +125,10 @@ def check_storage_usage() -> Tuple[int, float]:
 
 @pipeline_step("upload")
 def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = None) -> str:
-    """
-    Upload video to R2 with free tier safeguards.
-    
-    Args:
-        local_path: Path to video file
-        auto_cleanup: Automatically clean old videos before upload (default: True)
-        pr_number: Optional PR number to include in filename
-    """
     if not local_path.exists():
         raise FileNotFoundError(local_path)
 
-    # Check file size (warn if > 50MB)
+
     file_size_mb = get_file_size_mb(local_path)
     if file_size_mb > 50:
         print(f"[upload] warning large file size_mb={file_size_mb:.1f}", flush=True)
@@ -164,8 +141,8 @@ def upload_video(local_path: Path, auto_cleanup: bool = True, pr_number: int = N
         print(f"[upload] warning storage high size_mb={total_size_mb:.1f}", flush=True)
         if auto_cleanup:
             print("[upload] running automatic cleanup", flush=True)
-            cleanup_old_videos(max_videos=30, max_age_days=3)  # More aggressive cleanup
-    
+            cleanup_old_videos(max_videos=30, max_age_days=3)                           
+
     public_base = os.getenv("R2_PUBLIC_BASE_URL")
     if not public_base:
         raise ValueError("R2_PUBLIC_BASE_URL is required")
