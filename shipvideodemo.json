@@ -77,7 +77,14 @@
       "start": "/",
       "steps": [
         "Click \"Try Premium\"",
-        "Click \"Start 14-day trial\""
+        {
+          "action": "click",
+          "label": "Start 14-day trial",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/account/billing/trial-activated"
+          }
+        }
       ],
       "success": "URL is \"/account/billing/trial-activated\" and the page shows \"Trial activated successfully.\""
     }

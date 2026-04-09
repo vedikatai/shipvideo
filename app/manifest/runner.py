@@ -41,6 +41,7 @@ class ManifestFlow:
     name: str
     start_route: str
     click_labels: List[str]
+    step_conditions: List[Optional[TerminalCondition]]
     terminal_condition: TerminalCondition
     terminal_url: str = ""
     selection_reason: str = ""
@@ -86,6 +87,41 @@ def _parse_click_label(step: Any) -> str:
     if not label:
         raise ValueError("manifest click label cannot be empty")
     return label
+
+
+def _parse_condition_object(raw: Any, *, field_name: str) -> TerminalCondition:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field_name} must be an object")
+    cond_type = str(raw.get("type") or "").strip()
+    cond_value = str(raw.get("value") or "").strip()
+    if cond_type not in {"url_match", "text_present", "element_present"}:
+        raise ValueError(f"{field_name}.type must be one of url_match, text_present, element_present")
+    if not cond_value:
+        raise ValueError(f"{field_name}.value cannot be empty")
+    if cond_type == "url_match":
+        cond_value = _normalize_route(cond_value)
+    return TerminalCondition(type=cond_type, value=cond_value)
+
+
+def _parse_manifest_step(step: Any) -> tuple[str, Optional[TerminalCondition]]:
+    if isinstance(step, str):
+        return _parse_click_label(step), None
+    if not isinstance(step, dict):
+        raise ValueError(f"manifest step must be a string or object, got {type(step).__name__}")
+
+    action = str(step.get("action") or "click").strip().lower()
+    if action != "click":
+        raise ValueError(f"unsupported manifest step action: {action!r}")
+
+    label = str(step.get("label") or step.get("text") or "").strip()
+    if not label:
+        raise ValueError("manifest click step missing label")
+
+    success_condition = step.get("success_condition") or step.get("validation_condition")
+    parsed_condition = None
+    if success_condition is not None:
+        parsed_condition = _parse_condition_object(success_condition, field_name="manifest step success_condition")
+    return label, parsed_condition
 
 
 def _parse_terminal_condition(success: Any) -> tuple[TerminalCondition, str]:
@@ -146,7 +182,9 @@ def _load_manifest_flows() -> List[ManifestFlow]:
         steps = item.get("steps")
         if not isinstance(steps, list) or not steps:
             raise ValueError(f"manifest flow {name!r} must contain non-empty steps")
-        click_labels = [_parse_click_label(step) for step in steps]
+        parsed_steps = [_parse_manifest_step(step) for step in steps]
+        click_labels = [label for label, _ in parsed_steps]
+        step_conditions = [condition for _, condition in parsed_steps]
         terminal_condition, terminal_url = _parse_terminal_condition(item.get("success"))
         suggested_demo_flow = str(item.get("description") or item.get("narration") or "").strip()
         parsed.append(
@@ -154,6 +192,7 @@ def _load_manifest_flows() -> List[ManifestFlow]:
                 name=name,
                 start_route=start_route,
                 click_labels=click_labels,
+                step_conditions=step_conditions,
                 terminal_condition=terminal_condition,
                 terminal_url=terminal_url,
                 suggested_demo_flow=suggested_demo_flow,
@@ -225,6 +264,7 @@ def get_manifest_flow(pr_context: Dict[str, Any]) -> Optional[ManifestFlow]:
         name=best_flow.name,
         start_route=best_flow.start_route,
         click_labels=list(best_flow.click_labels),
+        step_conditions=list(best_flow.step_conditions),
         terminal_condition=best_flow.terminal_condition,
         terminal_url=best_flow.terminal_url,
         selection_reason="; ".join(best_reasons) or "manifest_match",
@@ -240,7 +280,17 @@ def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
     ]
 
     for index, label in enumerate(flow.click_labels):
-        if index + 1 < len(flow.click_labels):
+        step_condition = (
+            flow.step_conditions[index]
+            if index < len(flow.step_conditions)
+            else None
+        )
+        if step_condition is not None:
+            validation = {
+                "type": step_condition.type,
+                "value": step_condition.value,
+            }
+        elif index + 1 < len(flow.click_labels):
             next_label = flow.click_labels[index + 1]
             validation = {"type": "element_present", "value": next_label}
         else:

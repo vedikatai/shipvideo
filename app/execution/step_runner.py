@@ -195,8 +195,13 @@ def _settle_ab_page(
                     timeout_s=AB_VALIDATION_WAIT_TIMEOUT_S,
                 ):
                     settle["validation_wait"] = "element_present"
-        except Exception:
-            pass
+        except Exception as exc:
+            if cond_type == "text_present":
+                print(
+                    f"[step_runner] wait_for_text failed value={cond_value!r} "
+                    f"error={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
 
     settle["fallback_wait_used"] = not settle["networkidle"]
 
@@ -521,6 +526,7 @@ def _run_ab_click_attempt(
     click_attempt_limit: int,
     mode: str,
     extract_snapshot: Any,
+    post_click_wait_ms: int = 0,
 ) -> Dict[str, Any]:
     attempt_screenshots: List[Path] = []
     result: Dict[str, Any] = {
@@ -658,6 +664,14 @@ def _run_ab_click_attempt(
         result["stale_ref_error"] = _is_stale_ref_error(error_message, click_target)
         return result
 
+    if post_click_wait_ms > 0:
+        try:
+            cli.wait(post_click_wait_ms)
+            step_result["post_click_wait_ms"] = int(post_click_wait_ms)
+        except Exception as exc:
+            result["error"] = f"post_click_wait_failed:{exc}"
+            return result
+
     validation_condition = _extract_validation_condition(step)
     step_result["post_click_settle"] = _settle_ab_page(
         cli,
@@ -710,6 +724,13 @@ def _run_ab_click_attempt(
         snap_before=snap,
         snap_after=snap_after,
     )
+    if not validation["passed"]:
+        waited_validation = _validation_from_successful_text_wait(
+            step=step,
+            step_result=step_result,
+        )
+        if waited_validation is not None:
+            validation = waited_validation
     result["validation"] = validation
     ui_diff = cli.compare_snapshots(snap, snap_after)
     condition = validation["condition"]
@@ -1017,6 +1038,7 @@ def _run_ab_changed_testid_search(
                     click_attempt_limit=1,
                     mode=mode,
                     extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                    post_click_wait_ms=0,
                 )
                 shot_idx = int(attempt_result["shot_idx"])
                 step_result["outcome"] = str(attempt_result["outcome"] or "click_failed")
@@ -1581,6 +1603,28 @@ def _evaluate_click_validation(
         actual=_describe_validation_actual(condition, snap_after),
         source=source if source in {"step", "test_case"} else "step",
         failure_reason="" if passed else f"validation_failed:{condition['type']}:{condition['value']}",
+    )
+
+
+def _validation_from_successful_text_wait(
+    *,
+    step: Dict[str, Any],
+    step_result: Dict[str, Any],
+) -> Optional[StepValidationResult]:
+    condition = _extract_validation_condition(step)
+    if condition is None or condition["type"] != "text_present":
+        return None
+
+    post_click_settle = step_result.get("post_click_settle") or {}
+    if str(post_click_settle.get("validation_wait") or "") != "text_present":
+        return None
+
+    return StepValidationResult(
+        passed=True,
+        condition=condition,
+        actual=condition["value"],
+        source="wait_for_text",
+        failure_reason="",
     )
 
 
@@ -2292,6 +2336,13 @@ def run_ab_stepwise(
                         "index": step_idx, "attempt": attempt, "intent": intent,
                     })
 
+                    next_step = queue[step_idx + 1] if step_idx + 1 < len(queue) else {}
+                    post_click_wait_ms = (
+                        2000
+                        if str(next_step.get("action") or "") == "assert_terminal"
+                        else 0
+                    )
+
                     try:
                         attempt_result = _run_ab_click_attempt(
                             cli=cli,
@@ -2303,6 +2354,7 @@ def run_ab_stepwise(
                             click_attempt_limit=click_attempt_limit,
                             mode=mode,
                             extract_snapshot=lambda **kwargs: extract_ab_context(cli, **kwargs),
+                            post_click_wait_ms=post_click_wait_ms,
                         )
                     except AgentBrowserError as exc:
                         outcome = "stale_ref_unrecovered" if stale_ref_retry_used else "click_failed"
