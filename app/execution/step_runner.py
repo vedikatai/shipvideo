@@ -188,12 +188,102 @@ def _settle_ab_page(
             elif cond_type == "url_match":
                 cli.wait_for_url(cond_value, timeout=AB_VALIDATION_WAIT_TIMEOUT_S)
                 settle["validation_wait"] = "url_match"
+            elif cond_type == "element_present":
+                if _wait_for_ab_element_present(
+                    cli,
+                    cond_value,
+                    timeout_s=AB_VALIDATION_WAIT_TIMEOUT_S,
+                ):
+                    settle["validation_wait"] = "element_present"
         except Exception:
             pass
 
     settle["fallback_wait_used"] = not settle["networkidle"]
 
     return settle
+
+
+def _wait_for_ab_element_present(
+    cli: Any,
+    expected: str,
+    *,
+    timeout_s: int = AB_VALIDATION_WAIT_TIMEOUT_S,
+) -> bool:
+    needle = str(expected or "").strip()
+    if not needle:
+        return False
+
+    deadline = time.monotonic() + max(int(timeout_s), 1)
+    selector_candidates = (f"[data-testid='{needle}']", f"#{needle}")
+
+    while time.monotonic() < deadline:
+        try:
+            ref = cli.find_testid_ref(needle)
+            if ref and cli.is_visible(ref):
+                return True
+        except Exception:
+            pass
+
+        for selector in selector_candidates:
+            try:
+                if cli.get_count(selector) > 0:
+                    return True
+            except Exception:
+                pass
+
+        try:
+            semantic_ref = cli.find_ref(needle)
+            if semantic_ref and cli.is_visible(semantic_ref):
+                return True
+        except Exception:
+            pass
+
+        try:
+            cli.wait(250)
+        except Exception:
+            pass
+
+    return False
+
+
+def _wait_for_playwright_validation(
+    page: Page,
+    condition: Optional[ValidationCondition],
+) -> None:
+    if condition is None:
+        return
+
+    cond_type = str(condition.get("type") or "").strip()
+    cond_value = str(condition.get("value") or "").strip()
+    if not cond_type or not cond_value:
+        return
+
+    if cond_type == "text_present":
+        page.get_by_text(cond_value, exact=False).first.wait_for(
+            state="visible",
+            timeout=8000,
+        )
+        return
+
+    if cond_type == "url_match":
+        page.wait_for_url(f"**{cond_value}**", timeout=8000)
+        return
+
+    if cond_type == "element_present":
+        selector_candidates = [
+            f"[data-testid='{cond_value}']",
+            f"#{cond_value}",
+        ]
+        for selector in selector_candidates:
+            try:
+                page.locator(selector).first.wait_for(state="visible", timeout=8000)
+                return
+            except Exception:
+                pass
+        page.get_by_text(cond_value, exact=False).first.wait_for(
+            state="visible",
+            timeout=8000,
+        )
 
 
 def _resolve_ab_ref_with_commands(
@@ -1644,6 +1734,15 @@ def _assert_ab_terminal_condition(
             pass
 
     if cond_type == "element_present" and expected:
+        if _wait_for_ab_element_present(
+            cli,
+            expected,
+            timeout_s=AB_VALIDATION_WAIT_TIMEOUT_S,
+        ):
+            result["source"] = "wait_for_element_present"
+            result["actual"] = expected
+            return result
+
         testid_ref = cli.find_testid_ref(expected)
         if testid_ref:
             try:
@@ -1705,11 +1804,14 @@ def _execute_one(
     if action == "click":
         selector = (step.get("selector") or "").strip()
         text = (step.get("label") or step.get("text") or "").strip()
+        validation_condition = _extract_validation_condition(step)
         if selector:
             page.locator(selector).first.click(timeout=8000)
+            _wait_for_playwright_validation(page, validation_condition)
             return True, shot_idx, None
         if text:
             page.get_by_text(text, exact=True).first.click(timeout=8000)
+            _wait_for_playwright_validation(page, validation_condition)
             return True, shot_idx, None
         return False, shot_idx, "missing_click_target"
     if action == "screenshot":
