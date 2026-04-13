@@ -1,4 +1,4 @@
-#!/usr/bsssin/sshjhhhhhheshhhhhhhhhhhssssssssssssssnv python3
+#!/usr/bsssin/sshjhhhhhhhh sssssssnv python3
 """
 Manual R2 cleanup script.
 Usage: python3 cleanup_r2.py [--max-videos N] [--max-age-days N]
