@@ -32,13 +32,32 @@
       "success": "A popup is visible with the text \"🎉 Popup triggered!\" and a \"Close\" button."
     },
     {
-      "name": "Join waitlist",
-      "start": "/",
+      "name": "Read testimonial and join waitlist",
+      "start": "/testimonials",
       "steps": [
-        "Click \"Waitlist\"",
-        "Click \"Apply to waitlist\""
+        "Click \"Join waitlist\"",
+        "Click \"Apply to waitlist\"",
+        "Click \"Confirm\"",
+        "Click \"Back to home\""
       ],
-      "success": "URL is \"/waitlist\" and a modal shows the text \"Application for waitlist successful.\""
+      "success": "URL is \"/\" or the page shows \"You're on the list\"."
+    },
+    {
+      "name": "Read testimonial and follow rollout map",
+      "start": "/testimonials",
+      "steps": [
+        "Click \"Review rollout map\"",
+        "Click \"Start track A\"",
+        {
+          "action": "click",
+          "label": "Continue to track B →",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/scenario-matrix/track-a/track-b"
+          }
+        }
+      ],
+      "success": "URL is \"/scenario-matrix/track-a/track-b\" or the page shows \"Track A complete\"."
     },
     {
       "name": "Recharge account from settings",
