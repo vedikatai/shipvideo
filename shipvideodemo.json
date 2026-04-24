@@ -68,11 +68,24 @@
     },
     {
       "name": "Complete creator journey sign-off flow",
-      "start": "/",
+      "start": "/creator-journey",
       "steps": [
-        "Click \"Open creator journey\"",
-        "Click \"Start storyboard review\"",
-        "Click \"Send to client sign-off →\""
+        {
+          "action": "click",
+          "label": "Start storyboard review",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/creator-journey/kickoff"
+          }
+        },
+        {
+          "action": "click",
+          "label": "Send to client sign-off →",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/creator-journey/kickoff/client-signoff"
+          }
+        }
       ],
       "success": "URL is \"/creator-journey/kickoff/client-signoff\" and the page shows \"Client sign-off complete\"."
     },

@@ -83,7 +83,7 @@ async def analyze_pr(
             {
                 "pr_title": pr_title or "",
                 "diff_files": diff_files,
-                "start_route": start_route or "",
+                "start_route": start_route or contract.start_route or "",
             }
         )
         if manifest_flow is not None:

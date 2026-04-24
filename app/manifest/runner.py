@@ -223,6 +223,16 @@ def _score_flow(flow: ManifestFlow, ctx: ManifestContext) -> tuple[int, List[str
         score += 5
         reasons.append(f"changed_terminal_url={flow.terminal_url}")
 
+    flow_step_urls = [
+        condition.value
+        for condition in flow.step_conditions
+        if condition is not None and condition.type == "url_match"
+    ]
+    matched_step_urls = sorted({route for route in flow_step_urls if route in changed_routes})
+    if matched_step_urls:
+        score += len(matched_step_urls) * 5
+        reasons.append(f"changed_step_urls={','.join(matched_step_urls)}")
+
     overlap = sorted(flow_name_tokens & title_tokens)
     if overlap:
         score += len(overlap) * 2
