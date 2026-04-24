@@ -3,6 +3,9 @@
     "/",
     "/account/billing/trial-activated",
     "/billing",
+    "/creator-journey",
+    "/creator-journey/kickoff",
+    "/creator-journey/kickoff/client-signoff",
     "/dashboard",
     "/faq",
     "/features",
@@ -48,14 +51,7 @@
       "steps": [
         "Click \"Review rollout map\"",
         "Click \"Start track A\"",
-        {
-          "action": "click",
-          "label": "Continue to track B →",
-          "success_condition": {
-            "type": "url_match",
-            "value": "/scenario-matrix/track-a/track-b"
-          }
-        }
+        "Click \"Continue to track B →\""
       ],
       "success": "URL is \"/scenario-matrix/track-a/track-b\" or the page shows \"Track A complete\"."
     },
@@ -69,6 +65,16 @@
         "Click \"Proceed\""
       ],
       "success": "URL remains \"/settings\" and a success modal shows \"Recharge Successful\"."
+    },
+    {
+      "name": "Complete creator journey sign-off flow",
+      "start": "/",
+      "steps": [
+        "Click \"Open creator journey\"",
+        "Click \"Start storyboard review\"",
+        "Click \"Send to client sign-off →\""
+      ],
+      "success": "URL is \"/creator-journey/kickoff/client-signoff\" and the page shows \"Client sign-off complete\"."
     },
     {
       "name": "Complete test lab deep flow",
