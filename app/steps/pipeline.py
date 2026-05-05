@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.steps.pr_extraction import fetch_pr_diff
+from app.manifest import flow_to_generation_context, flow_to_steps, get_manifest_flow
 from app.render import render_video
 from app.steps.step_execution import run_capture
 from app.steps.step_generation import generate_steps_from_diff
@@ -76,6 +77,33 @@ async def analyze_pr(
                 "narration": "Demo generation skipped for this pull request.",
                 "llm_cost_usd": 0.0,
                 "generation_context": None,
+            }
+
+        manifest_flow = get_manifest_flow(
+            {
+                "pr_title": pr_title or "",
+                "diff_files": diff_files,
+                "start_route": start_route or contract.start_route or "",
+            }
+        )
+        if manifest_flow is not None:
+            steps = flow_to_steps(manifest_flow)
+            print(
+                "[steps.pipeline/analyze_pr] manifest flow selected "
+                f"name={manifest_flow.name!r} reason={manifest_flow.selection_reason!r} "
+                f"steps={len(steps)}",
+                flush=True,
+            )
+            return {
+                "steps": steps,
+                "narration": (
+                    manifest_flow.suggested_demo_flow
+                    or f"Demo for manifest flow: {manifest_flow.name}."
+                ),
+                "budget_exceeded": False,
+                "llm_cost_usd": 0.0,
+                "suggested_demo_flow": manifest_flow.suggested_demo_flow,
+                "generation_context": flow_to_generation_context(manifest_flow),
             }
 
         flow = await generate_steps_from_diff(

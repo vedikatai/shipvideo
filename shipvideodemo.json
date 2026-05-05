@@ -1,75 +1,130 @@
 {
-    "routes": [
-      "/",
-      "/billing",
-      "/dashboard",
-      "/faq",
-      "/features",
-      "/scenario-matrix",
-      "/scenario-matrix/alt-path",
-      "/scenario-matrix/alt-path/final",
-      "/scenario-matrix/track-a",
-      "/scenario-matrix/track-a/track-b",
-      "/settings",
-      "/settings/download-bill",
-      "/test-lab",
-      "/test-lab/phase-1",
-      "/test-lab/phase-1/phase-2",
-      "/test-lab/phase-1/phase-2/phase-3",
-      "/test-lab/side-route",
-      "/test-lab/side-route/review",
-      "/testimonials",
-      "/waitlist"
-    ],
-    "flows": [
-      {
-        "name": "Home popup demo",
-        "start": "/",
-        "steps": [
-          "Click \"Click Me\""
-        ],
-        "success": "A popup is visible with the text \"🎉 Popup triggered!\" and a \"Close\" button."
-      },
-      {
-        "name": "Join waitlist",
-        "start": "/",
-        "steps": [
-          "Click \"Waitlist\"",
-          "Click \"Apply to waitlist\""
-        ],
-        "success": "URL is \"/waitlist\" and a modal shows the text \"Application for waitlist successful.\""
-      },
-      {
-        "name": "Recharge account from settings",
-        "start": "/",
-        "steps": [
-          "Click \"Settings\"",
-          "Click \"₹2000\"",
-          "Click \"Recharge Now\"",
-          "Click \"Proceed\""
-        ],
-        "success": "URL remains \"/settings\" and a success modal shows \"Recharge Successful\"."
-      },
-      {
-        "name": "Complete test lab deep flow",
-        "start": "/",
-        "steps": [
-          "Click \"Open test lab (start here)\"",
-          "Click \"Start deep flow (phase 1 → 2 → 3)\"",
-          "Click \"Continue to phase 2 →\"",
-          "Click \"Continue to phase 3 (final) →\""
-        ],
-        "success": "URL is \"/test-lab/phase-1/phase-2/phase-3\" and the page shows \"Deep flow finished\"."
-      },
-      {
-        "name": "Finish scenario matrix alternate branch",
-        "start": "/",
-        "steps": [
-          "Click \"Open scenario matrix\"",
-          "Click \"Open alt path\"",
-          "Click \"Open final stage →\""
-        ],
-        "success": "URL is \"/scenario-matrix/alt-path/final\" and the page shows \"Alternate branch complete\"."
-      }
-    ]
-  }
+  "routes": [
+    "/",
+    "/account/billing/trial-activated",
+    "/billing",
+    "/creator-journey",
+    "/creator-journey/kickoff",
+    "/creator-journey/kickoff/client-signoff",
+    "/dashboard",
+    "/faq",
+    "/features",
+    "/scenario-matrix",
+    "/scenario-matrix/alt-path",
+    "/scenario-matrix/alt-path/final",
+    "/scenario-matrix/track-a",
+    "/scenario-matrix/track-a/track-b",
+    "/settings",
+    "/settings/download-bill",
+    "/test-lab",
+    "/test-lab/phase-1",
+    "/test-lab/phase-1/phase-2",
+    "/test-lab/phase-1/phase-2/phase-3",
+    "/test-lab/side-route",
+    "/test-lab/side-route/review",
+    "/testimonials",
+    "/waitlist"
+  ],
+  "flows": [
+    {
+      "name": "Home popup demo",
+      "start": "/",
+      "steps": [
+        "Click \"Click Me\""
+      ],
+      "success": "A popup is visible with the text \"🎉 Popup triggered!\" and a \"Close\" button."
+    },
+    {
+      "name": "Read testimonial and join waitlist",
+      "start": "/testimonials",
+      "steps": [
+        "Click \"Join waitlist\"",
+        "Click \"Apply to waitlist\"",
+        "Click \"Confirm\"",
+        "Click \"Back to home\""
+      ],
+      "success": "URL is \"/\" or the page shows \"You're on the list\"."
+    },
+    {
+      "name": "Read testimonial and follow rollout map",
+      "start": "/testimonials",
+      "steps": [
+        "Click \"Review rollout map\"",
+        "Click \"Start track A\"",
+        "Click \"Continue to track B →\""
+      ],
+      "success": "URL is \"/scenario-matrix/track-a/track-b\" or the page shows \"Track A complete\"."
+    },
+    {
+      "name": "Recharge account from settings",
+      "start": "/",
+      "steps": [
+        "Click \"Settings\"",
+        "Click \"₹2000\"",
+        "Click \"Recharge Now\"",
+        "Click \"Proceed\""
+      ],
+      "success": "URL remains \"/settings\" and a success modal shows \"Recharge Successful\"."
+    },
+    {
+      "name": "Complete creator journey sign-off flow",
+      "start": "/creator-journey",
+      "steps": [
+        {
+          "action": "click",
+          "label": "Start storyboard review",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/creator-journey/kickoff"
+          }
+        },
+        {
+          "action": "click",
+          "label": "Send to client sign-off →",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/creator-journey/kickoff/client-signoff"
+          }
+        }
+      ],
+      "success": "URL is \"/creator-journey/kickoff/client-signoff\" and the page shows \"Client sign-off complete\"."
+    },
+    {
+      "name": "Complete test lab deep flow",
+      "start": "/",
+      "steps": [
+        "Click \"Open test lab (start here)\"",
+        "Click \"Start deep flow (phase 1 → 2 → 3)\"",
+        "Click \"Continue to phase 2 →\"",
+        "Click \"Continue to phase 3 (final) →\""
+      ],
+      "success": "URL is \"/test-lab/phase-1/phase-2/phase-3\" and the page shows \"Deep flow finished\"."
+    },
+    {
+      "name": "Finish scenario matrix alternate branch",
+      "start": "/",
+      "steps": [
+        "Click \"Open scenario matrix\"",
+        "Click \"Open alt path\"",
+        "Click \"Open final stage →\""
+      ],
+      "success": "URL is \"/scenario-matrix/alt-path/final\" and the page shows \"Alternate branch complete\"."
+    },
+    {
+      "name": "Activate premium trial",
+      "start": "/",
+      "steps": [
+        "Click \"Try Premium\"",
+        {
+          "action": "click",
+          "label": "Start 14-day trial",
+          "success_condition": {
+            "type": "url_match",
+            "value": "/account/billing/trial-activated"
+          }
+        }
+      ],
+      "success": "URL is \"/account/billing/trial-activated\" and the page shows \"Trial activated successfully.\""
+    }
+  ]
+}
