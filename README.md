@@ -1,2 +1,1 @@
-
-This product automatically generates high-quality demo videos directly from a pull request by capturing real UI behavior with Playwright, summarizing changes with an LLM, and adding narration via TTS. It runs in CI, records the affected flow on a staging environment, stitches everything with FFmpeg, and posts the finished video back to the PR. Teams get instant, accurate feature demos without manual recording, editing, or prompting. It replaces hours of product marketing and engineering effort with a fully automated pipeline. This becomes the single source of truth for release videos, changelogs, and customer updates.
+Python backend pipeline for shipdemos.com
