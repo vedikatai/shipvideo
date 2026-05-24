@@ -3,6 +3,7 @@ anthropic
 
 # GitHub
 PyGithub
+requests
 
 # Storage (R2/S3)
 boto3
