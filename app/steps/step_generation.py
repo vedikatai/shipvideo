@@ -490,28 +490,31 @@ def _route_snapshot_catalog(
         catalog[route] = {
             "buttons": [
                 {
-                    "text": (btn.get("text") or "").strip(),
-                    "selector": (btn.get("selector") or "").strip(),
+                    "text": (btn.get("text") or "").strip()[:80],
                     "testid": (btn.get("testid") or "").strip(),
-                    "aria": (btn.get("aria") or "").strip(),
+                    "aria": (btn.get("aria") or "").strip()[:80],
                 }
                 for btn in buttons
-                if (btn.get("text") or btn.get("selector") or "").strip()
-            ][:20],
+                if (btn.get("text") or btn.get("testid") or btn.get("aria") or "").strip()
+            ][:12],
             "links": [
                 {
-                    "text": (link.get("text") or "").strip(),
-                    "href": (link.get("href") or "").strip(),
+                    "text": (link.get("text") or "").strip()[:80],
+                    "href": (link.get("href") or "").strip()[:120],
                 }
                 for link in links
                 if (link.get("text") or "").strip()
-            ][:20],
+            ][:10],
             "data_testids": [
                 (item.get("testid") or "").strip()
                 for item in data_testids
                 if (item.get("testid") or "").strip()
-            ][:20],
+            ][:12],
         }
+    # Cap routes in the prompt — long multi-page crawls were dominating tokens.
+    if len(catalog) > 8:
+        priority = [r for r in fallback_routes if r in catalog][:8]
+        catalog = {r: catalog[r] for r in priority if r in catalog}
     return catalog
 
 
@@ -925,7 +928,7 @@ def _build_planning_prompt(
             "real_inputs": real_inputs,
             "data_testids": real_data_testids,
 
-            "diff_summary": diff_text[:2000] if diff_text else "",
+            "diff_summary": diff_text[:1200] if diff_text else "",
         },
         ensure_ascii=False,
     )

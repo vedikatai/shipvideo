@@ -139,41 +139,46 @@ def generate_next_steps(
         {"text": (b.get("text") or "").strip(), "testid": (b.get("testid") or "").strip(), "aria": (b.get("aria") or "").strip(), "id": (b.get("id") or "").strip()}
         for b in (dom_context.get("buttons") or [])
         if (b.get("text") or b.get("testid") or b.get("aria") or "").strip()
-    ][:15]
+    ][:12]
     available_links = [
         {"text": (l.get("text") or "").strip(), "href": (l.get("href") or "").strip()}
         for l in (dom_context.get("links") or [])
         if (l.get("text") or "").strip()
-    ][:10]
+    ][:8]
+    data_testids = [
+        (t.get("testid") if isinstance(t, dict) else t) or ""
+        for t in (dom_context.get("data_testids") or [])
+    ]
+    data_testids = [str(t).strip() for t in data_testids if str(t).strip()][:20]
+    routes = list(dom_context.get("routes") or ["/"])[:12]
+    # Keep objective lean — full generation_context blows prompt tokens.
+    objective_lean = {
+        "goal": (objective or {}).get("goal") or (objective or {}).get("title") or "",
+        "target_testid": (objective or {}).get("target_testid") or "",
+        "start_route": (objective or {}).get("start_route") or "",
+    }
+    prev_err = previous_error or {}
+    previous_error_lean = {
+        k: prev_err.get(k)
+        for k in ("error", "outcome", "reason", "message", "failed_action", "intent")
+        if prev_err.get(k)
+    }
 
     system_msg = (
-        "You generate ONLY the immediate next UI automation step(s) from the CURRENT DOM.\n"
-        "Do NOT assume any selector from a previous step is still valid after navigation.\n\n"
-        "── HOW TO TARGET ELEMENTS (follow this decision tree exactly) ──\n"
-        "1. If the button/element has a data-testid listed in dom_context.data_testids:\n"
-        "   → set selector=\"[data-testid='the-testid']\"  AND  label=\"\" AND text=\"\"\n"
-        "2. If the button/element has an aria-label listed in dom_context.buttons[].aria:\n"
-        "   → set selector=\"[aria-label='the-aria']\"  AND  label=\"\" AND text=\"\"\n"
-        "3. For EVERYTHING ELSE (including role-based targeting):\n"
-        "   → set selector=\"\"  AND  label=\"exact visible button/link text from dom_context\" AND text=\"\"\n"
-        "   The label MUST appear verbatim in dom_context.available_buttons[].text or available_links[].text.\n\n"
-        "── STRICTLY FORBIDDEN ──\n"
-        "• NEVER put role descriptions in selector (e.g. 'role=button name=X' is WRONG).\n"
-        "• NEVER put compound CSS in selector (e.g. 'button[role=\"button\"]' is WRONG).\n"
-        "• NEVER invent button text not present in dom_context.available_buttons or available_links.\n"
-        "• NEVER use a raw #id or .class selector unless that exact id/class is listed in dom_context.\n\n"
-        "── GOTO RULES ──\n"
-        "• url must be in dom_context.routes. Never invent routes.\n"
+        "Generate ONLY the next UI step(s) from CURRENT DOM evidence.\n"
+        "Targeting priority: data-testid selector → aria-label selector → exact visible label.\n"
+        "Never invent routes, labels, or CSS selectors not present in the payload.\n"
+        "Set unused fields to empty string.\n"
     )
 
     payload = {
-        "objective": objective,
+        "objective": objective_lean,
         "current_path": dom_context.get("current_path", "/"),
-        "routes": dom_context.get("routes", ["/"]),
+        "routes": routes,
         "available_buttons": available_buttons,
         "available_links": available_links,
-        "data_testids": dom_context.get("data_testids", []),
-        "previous_error": previous_error or {},
+        "data_testids": data_testids,
+        "previous_error": previous_error_lean,
     }
     messages = [
         {"role": "system", "content": system_msg},
@@ -230,25 +235,41 @@ def generate_single_step_toward_testid(
     }
 
     system_msg = (
-        "You are navigating toward one specific changed UI target.\n"
-        "Choose exactly one next action from the CURRENT browser evidence.\n"
-        "Return one action only.\n"
-        "Never invent routes, labels, or selectors.\n"
-        "If you choose click, it must target a currently visible interactive element.\n"
-        "If an element has a testid in the snapshot, prefer selector=\"[data-testid='x']\".\n"
-        "If an element has an aria label in the snapshot, prefer selector=\"[aria-label='x']\".\n"
-        "Otherwise use label with exact visible text from the snapshot.\n"
-        "Choose the single action most likely to make the target testid visible next."
+        "Navigate toward one target testid. Return exactly one action.\n"
+        "Prefer data-testid / aria-label selectors; else exact visible label.\n"
+        "Never invent routes, labels, or selectors not in the payload."
     )
+    interactive = snapshot.get("interactive_elements") or []
+    compact_elements = [
+        {
+            "ref": str(e.get("ref") or ""),
+            "role": str(e.get("role") or ""),
+            "name": str(e.get("name") or "")[:80],
+            "testid": str(e.get("testid") or ""),
+            "aria_label": str(e.get("aria_label") or "")[:80],
+        }
+        for e in interactive[:40]
+        if str(e.get("ref") or "").strip()
+    ]
+    objective_lean = {
+        "goal": (objective or {}).get("goal") or (objective or {}).get("title") or "",
+        "start_route": (objective or {}).get("start_route") or "",
+    }
+    prev_err = previous_error or {}
+    previous_error_lean = {
+        k: prev_err.get(k)
+        for k in ("error", "outcome", "reason", "message", "failed_action", "intent")
+        if prev_err.get(k)
+    }
     payload = {
-        "objective": objective,
+        "objective": objective_lean,
         "target_testid": target_testid,
         "current_url": snapshot.get("current_url", ""),
         "current_path": snapshot.get("current_path", "/"),
-        "headings": snapshot.get("headings", []),
-        "active_surfaces": snapshot.get("active_surfaces", []),
-        "interactive_elements": snapshot.get("interactive_elements", []),
-        "previous_error": previous_error or {},
+        "headings": (snapshot.get("headings") or [])[:8],
+        "active_surfaces": (snapshot.get("active_surfaces") or [])[:8],
+        "interactive_elements": compact_elements,
+        "previous_error": previous_error_lean,
     }
     messages = [
         {"role": "system", "content": system_msg},
@@ -299,8 +320,12 @@ async def find_ref_with_llm(
         return None
 
     compact_interactive = [
-        {"ref": str(e.get("ref") or ""), "role": str(e.get("role") or ""), "name": str(e.get("name") or "")}
-        for e in interactive_elements
+        {
+            "ref": str(e.get("ref") or ""),
+            "role": str(e.get("role") or ""),
+            "name": str(e.get("name") or "")[:80],
+        }
+        for e in interactive_elements[:50]
         if str(e.get("ref") or "").strip()
     ]
     if not compact_interactive:
@@ -312,18 +337,11 @@ async def find_ref_with_llm(
             for el in compact_interactive
         ]
     )
-    prompt = f"""
-You are selecting a UI element to click.
-
-Intent: "{intent}"
-
-Available interactive elements:
-{elements_text}
-
-Return only the ref string (e.g. "e10") of the best matching element.
-If no element matches the intent, return "none".
-No prose. No explanation. Just the ref or "none".
-"""
+    prompt = (
+        f'Pick best click target for intent "{intent}".\n'
+        f"Elements:\n{elements_text}\n"
+        'Reply with only the ref (e.g. e10) or none.'
+    )
     response = _call_llm_simple(prompt)
     ref = (response or "").strip().strip('"').strip("'")
     if not ref or ref.lower() == "none":

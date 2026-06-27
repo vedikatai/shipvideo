@@ -160,15 +160,8 @@ def _settle_ab_page(
         "fallback_wait_used": False,
     }
 
-    try:
-        cli.wait_for_load_state(
-            "networkidle",
-            timeout=AB_NETWORKIDLE_TIMEOUT_S,
-        )
-        settle["networkidle"] = True
-    except Exception:
-        pass
-
+    # DOMContentLoaded first — networkidle hangs forever on SPAs with sockets /
+    # analytics and used to race ahead of basic readiness.
     try:
         cli.wait_for_load_state(
             "domcontentloaded",
@@ -177,6 +170,21 @@ def _settle_ab_page(
         settle["domcontentloaded"] = True
     except Exception:
         pass
+
+    try:
+        cli.wait_for_load_state(
+            "networkidle",
+            timeout=AB_NETWORKIDLE_TIMEOUT_S,
+        )
+        settle["networkidle"] = True
+    except Exception:
+        # Dynamic UIs rarely go fully idle; give the framework a short beat
+        # so snapshots aren't taken mid-render.
+        try:
+            cli.wait(int(AB_SCROLL_SETTLE_TIMEOUT_S * 1000))
+        except Exception:
+            time.sleep(AB_SCROLL_SETTLE_TIMEOUT_S)
+        settle["fallback_wait_used"] = True
 
     if validation_condition is not None:
         cond_type = validation_condition["type"]
@@ -203,7 +211,8 @@ def _settle_ab_page(
                     flush=True,
                 )
 
-    settle["fallback_wait_used"] = not settle["networkidle"]
+    if not settle["fallback_wait_used"]:
+        settle["fallback_wait_used"] = not settle["networkidle"]
 
     return settle
 
@@ -1662,8 +1671,25 @@ def _step_screenshot_paths(step_result: Dict[str, Any]) -> List[Path]:
 
 
 def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
+    """Pick one post-action frame per successful milestone.
+
+    Prefer `after_screenshot` / primary `screenshot_path` over `before_screenshot`
+    so transitions show the state *after* the click/goto, not a duplicate pre-state
+    that makes FFmpeg scene cuts look stuttered.
+    """
     approved: List[str] = []
     seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        raw = str(path)
+        if not raw or raw in seen or not path.exists():
+            return
+        # Skip consecutive identical paths (same file reused across steps).
+        if approved and approved[-1] == raw:
+            return
+        seen.add(raw)
+        approved.append(raw)
+
     for idx, result in enumerate(results):
         if str(result.get("status") or "") != "ok":
             continue
@@ -1671,27 +1697,44 @@ def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
         step = result.get("step") or {}
         action = str(step.get("action") or "")
         keep = False
+        preferred_keys = ("screenshot_path", "after_screenshot", "before_screenshot")
+
         if action == "screenshot":
-            previous = results[idx - 1] if idx > 0 else {}
-            previous_step = previous.get("step") or {}
-            previous_action = str(previous_step.get("action") or "")
-            previous_ok = str(previous.get("status") or "") == "ok"
-            previous_success = str(previous.get("outcome") or "") == "success"
-            keep = (
-                outcome == "success"
-                and previous_ok
-                and previous_success
-                and previous_action in {"goto", "click"}
-            )
+            # Explicit screenshot steps are trusted when they succeed — even if the
+            # previous action was not a goto/click (e.g. assert_terminal retry).
+            keep = outcome in {"success", "ok", ""}
+            preferred_keys = ("screenshot_path", "after_screenshot", "before_screenshot")
+        elif action in {"goto", "click"}:
+            # Post-action frame is the accurate demo evidence for PR changes.
+            keep = outcome == "success"
+            preferred_keys = ("after_screenshot", "screenshot_path", "before_screenshot")
         elif action == "assert_terminal":
             keep = bool(result.get("terminal_condition_reached"))
+            preferred_keys = ("screenshot_path", "after_screenshot", "before_screenshot")
+
         if not keep:
             continue
+
+        chosen: Optional[Path] = None
+        for key in preferred_keys:
+            raw = str(result.get(key) or "").strip()
+            if raw and Path(raw).exists():
+                chosen = Path(raw)
+                break
+        if chosen is None:
+            paths = _step_screenshot_paths(result)
+            chosen = paths[0] if paths else None
+        if chosen is not None:
+            _add(chosen)
+            continue
+
+        # Fallback: legacy multi-path behavior without preferring before shots.
         for path in _step_screenshot_paths(result):
-            raw = str(path)
-            if raw and raw not in seen and Path(raw).exists():
-                seen.add(raw)
-                approved.append(raw)
+            name = path.name.lower()
+            if "before" in name and "after" not in name:
+                continue
+            _add(path)
+
     return approved
 
 

@@ -6,15 +6,15 @@ from app.trigger import score_file
 
 
 _TIER_BUDGET: Dict[int, int] = {
-    2: 4000,                                               
-    1: 1200,                                         
+    2: 2500,
+    1: 800,
 }
 
 
 def budget_diff_files(
     diff_files: List[Dict[str, Any]],
     *,
-    total_char_budget: int = 10_000,
+    total_char_budget: int = 6_000,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     was_truncated = False
     remaining = total_char_budget

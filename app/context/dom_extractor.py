@@ -7,47 +7,143 @@ from playwright.sync_api import Page
 from app.dom_schema import AgentBrowserElement, AgentBrowserSnapshot, DomSnapshot
 
 if TYPE_CHECKING:
-
-
-
     from app.browser.agent_browser_cli import AgentBrowserCLI
+
+
+# Walk light DOM + open shadow roots so web-component UIs are not invisible
+# to the planner / matcher.
+_COLLECT_INTERACTIVE_JS = """
+(maxItems) => {
+  const out = [];
+  const seen = new Set();
+
+  const push = (e) => {
+    if (!e || out.length >= maxItems) return;
+    const key = (e.getAttribute && (
+      e.getAttribute('data-testid')
+      || e.id
+      || e.getAttribute('aria-label')
+      || ''
+    )) + '|' + (e.innerText || e.value || '').trim().slice(0, 40);
+    if (seen.has(key) && key !== '|') return;
+    seen.add(key);
+    out.push({
+      role: (e.getAttribute('role') || (e.tagName || '').toLowerCase()).toLowerCase(),
+      text: (e.innerText || e.value || '').trim().slice(0, 100),
+      testid: e.getAttribute('data-testid') || '',
+      aria: e.getAttribute('aria-label') || '',
+      title: e.getAttribute('title') || '',
+      id: e.id || '',
+      selector: ''
+    });
+  };
+
+  const matchesInteractive = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'button') return true;
+    if (tag === 'a' && el.hasAttribute('href')) return true;
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      return t === 'button' || t === 'submit' || t === 'checkbox' || t === 'radio';
+    }
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (['button', 'link', 'tab', 'menuitem', 'checkbox', 'radio', 'textbox'].includes(role)) {
+      return true;
+    }
+    if (el.hasAttribute('data-testid') || el.hasAttribute('aria-label')) return true;
+    return false;
+  };
+
+  const walk = (root) => {
+    if (!root || out.length >= maxItems) return;
+    const nodes = root.querySelectorAll
+      ? root.querySelectorAll('*')
+      : [];
+    for (const el of nodes) {
+      if (matchesInteractive(el)) push(el);
+      if (el.shadowRoot) walk(el.shadowRoot);
+      if (out.length >= maxItems) return;
+    }
+  };
+
+  walk(document);
+  return out;
+}
+"""
+
+
+_COLLECT_LINKS_JS = """
+(maxItems) => {
+  const out = [];
+  const seen = new Set();
+  const walk = (root) => {
+    if (!root) return;
+    const nodes = root.querySelectorAll ? root.querySelectorAll('a[href], [role="link"]') : [];
+    for (const e of nodes) {
+      const href = e.getAttribute('href') || '';
+      const text = (e.innerText || '').trim().slice(0, 100);
+      const key = href + '|' + text;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        text,
+        href,
+        testid: e.getAttribute('data-testid') || '',
+        aria: e.getAttribute('aria-label') || '',
+        id: e.id || ''
+      });
+      if (e.shadowRoot) walk(e.shadowRoot);
+      if (out.length >= maxItems) return;
+    }
+    const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    for (const el of all) {
+      if (el.shadowRoot) walk(el.shadowRoot);
+      if (out.length >= maxItems) return;
+    }
+  };
+  walk(document);
+  return out.slice(0, maxItems);
+}
+"""
+
+
+_COLLECT_TESTIDS_JS = """
+(maxItems) => {
+  const out = [];
+  const seen = new Set();
+  const walk = (root) => {
+    if (!root) return;
+    const nodes = root.querySelectorAll ? root.querySelectorAll('[data-testid]') : [];
+    for (const e of nodes) {
+      const testid = e.getAttribute('data-testid') || '';
+      if (!testid || seen.has(testid)) continue;
+      seen.add(testid);
+      out.push({
+        testid,
+        tag: (e.tagName || '').toLowerCase(),
+        text: (e.innerText || '').trim().slice(0, 80)
+      });
+      if (out.length >= maxItems) return;
+    }
+    const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+    for (const el of all) {
+      if (el.shadowRoot) walk(el.shadowRoot);
+      if (out.length >= maxItems) return;
+    }
+  };
+  walk(document);
+  return out;
+}
+"""
 
 
 def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
     current_path = page.evaluate("() => window.location.pathname || '/'")
 
-    buttons = page.eval_on_selector_all(
-        "button, [role='button'], [aria-label], [data-testid], input[type='button'], input[type='submit']",
-        f"""els => els.slice(0, {max_items}).map(e => ({{
-            role: (e.getAttribute('role') || (e.tagName || '').toLowerCase()).toLowerCase(),
-            text: (e.innerText || e.value || "").trim().slice(0, 100),
-            testid: e.getAttribute('data-testid') || "",
-            aria: e.getAttribute('aria-label') || "",
-            title: e.getAttribute('title') || "",
-            id: e.id || "",
-            selector: ""
-        }}))""",
-    ) or []
-
-    links = page.eval_on_selector_all(
-        "a[href]",
-        f"""els => els.slice(0, {max_items}).map(e => ({{
-            text: (e.innerText || "").trim().slice(0, 100),
-            href: e.getAttribute('href') || "",
-            testid: e.getAttribute('data-testid') || "",
-            aria: e.getAttribute('aria-label') || "",
-            id: e.id || ""
-        }}))""",
-    ) or []
-
-    testids = page.eval_on_selector_all(
-        "[data-testid]",
-        f"""els => els.slice(0, {max_items * 2}).map(e => ({{
-            testid: e.getAttribute('data-testid') || "",
-            tag: (e.tagName || "").toLowerCase(),
-            text: (e.innerText || "").trim().slice(0, 80)
-        }}))""",
-    ) or []
+    buttons = page.evaluate(_COLLECT_INTERACTIVE_JS, max_items) or []
+    links = page.evaluate(_COLLECT_LINKS_JS, max_items) or []
+    testids = page.evaluate(_COLLECT_TESTIDS_JS, max_items * 2) or []
 
     dedup_tids: List[Dict[str, str]] = []
     seen = set()
@@ -93,7 +189,7 @@ def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
         "routes": sorted(routes),
         "buttons": buttons,
         "links": links,
-        "inputs": [],                                                                
+        "inputs": [],
         "data_testids": dedup_tids,
         "headings": [str(item).strip() for item in headings if str(item).strip()][:max_items],
         "active_surfaces": [str(item).strip() for item in active_surfaces if str(item).strip()][:max_items],
@@ -105,9 +201,7 @@ def extract_ab_context(
     *,
     save_raw: bool = True,
 ) -> AgentBrowserSnapshot:
-
-
-    from app.browser.agent_browser_cli import AgentBrowserCLI as _CLI              
+    from app.browser.agent_browser_cli import AgentBrowserCLI as _CLI  # noqa: F401
 
     print(
         f"[dom_extractor] extract_ab_context: save_raw={save_raw}",
