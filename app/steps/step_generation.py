@@ -693,6 +693,63 @@ def _ensure_screenshots_for_visited_pages(
     return out
 
 
+def _sanitize_terminal_assertions(
+    steps: List[Dict[str, Any]],
+    *,
+    contract: Optional[Any] = None,
+    real_data_testids: Optional[List[Any]] = None,
+    diff_text: str = "",
+) -> List[Dict[str, Any]]:
+    """Drop assert_terminal steps that are not grounded in contract/DOM/diff."""
+    terminal = getattr(contract, "terminal", None) if contract is not None else None
+    contract_value = ""
+    if terminal is not None:
+        contract_value = str(getattr(terminal, "value", "") or "").strip().lower()
+
+    known_testids = set()
+    for item in real_data_testids or []:
+        if isinstance(item, dict):
+            tid = str(item.get("testid") or "").strip().lower()
+        else:
+            tid = str(item or "").strip().lower()
+        if tid:
+            known_testids.add(tid)
+
+    diff_lower = (diff_text or "").lower()
+    out: List[Dict[str, Any]] = []
+    for step in steps:
+        if not isinstance(step, dict) or step.get("action") != "assert_terminal":
+            out.append(step)
+            continue
+
+        condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+        expected = (
+            str(condition.get("value") or "").strip()
+            or str(step.get("expected_element") or "").strip()
+            or str(step.get("expected_text") or "").strip()
+            or str(step.get("expected_url") or "").strip()
+        )
+        expected_l = expected.lower()
+        if not expected_l:
+            continue
+
+        grounded = False
+        if contract_value and (
+            expected_l == contract_value
+            or contract_value in expected_l
+            or expected_l in contract_value
+        ):
+            grounded = True
+        if expected_l in known_testids:
+            grounded = True
+        if expected_l and expected_l in diff_lower:
+            grounded = True
+
+        if grounded:
+            out.append(step)
+    return out
+
+
 def _inject_terminal_assertion(
     steps: List[Dict[str, Any]],
     contract: Optional[Any],

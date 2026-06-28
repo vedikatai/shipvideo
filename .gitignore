@@ -1,18 +1,38 @@
+# Secrets / local env — never commit
 .env
-venv
-
-__pycache__/
-
-third_party/git-glimpse
-
-# Python
-__pycache__/
-*.py[cod]
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+credentials.json
+service-account*.json
 
 # Virtual environments
 .venv/
 venv/
 env/
+venv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Third-party vendored / tools
+third_party/git-glimpse
+git-glimpse/
+
+# Capture / render artifacts (generated)
 app/*.png
 app/data/
 app/screenshots/shot*.png
@@ -20,13 +40,14 @@ app/screenshots/out.mp4
 app/screenshots/debug/*.png
 app/screenshots/debug/*.json
 app/screenshots/step_1.png
-app/screenshots/video_tmp/4b29de01c430e5685527539d461ed694.webm
-
+app/screenshots/video_tmp/
+app/screenshotsdata/
+tmp/
+/tmp/
 
 shot1.png
 app/shot2.png
 out.mp4
+
 # OS junk
 .DS_Store
-git-glimpse/
-app/screenshotsdata/jobs/

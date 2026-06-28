@@ -1,24 +1,26 @@
 # API / LLM
-anthropic
+# anthropic removed: no imports in app/ or tests (unused)
+openai>=2.44.0,<3
 
 # GitHub
-PyGithub
-requests
+PyGithub>=2.9.1,<3
+requests>=2.32.0,<3
 
 # Storage (R2/S3)
-boto3
+boto3>=1.35.0,<2
 
 # Web server
-fastapi
-uvicorn[standard]
+fastapi>=0.115.0,<1
+uvicorn[standard]>=0.32.0,<1
 
 # Browser automation (capture)
-playwright
-openai
+playwright>=1.49.0,<2
 
 # Observability (MVP: tracing with ConsoleSpanExporter only)
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-exporter-otlp
-pytest
-Pillow
+opentelemetry-api>=1.28.0,<2
+opentelemetry-sdk>=1.28.0,<2
+opentelemetry-exporter-otlp>=1.28.0,<2
+
+# Tests / imaging
+pytest>=8.0.0,<10
+Pillow>=10.0.0,<13
