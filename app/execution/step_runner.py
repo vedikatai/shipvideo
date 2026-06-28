@@ -19,7 +19,13 @@ from app.browser.agent_browser_types import (
 from app.config_types import CaptureSettings
 from app.context.dom_extractor import extract_dom_context
 from app.dom_schema import ExperimentMode
-from app.execution.navigation_detector import capture_state, detect_major_change, wait_stable_after_navigation
+from app.execution.navigation_detector import (
+    capture_state,
+    detect_major_change,
+    wait_for_react_hydration,
+    wait_spa_ready_for_screenshot,
+    wait_stable_after_navigation,
+)
 from app.llm.retry_engine import regenerate_with_feedback, regenerate_single_step_toward_testid
 from app.policy.selector_validator import validate_step_against_dom
 from observability import record_agent_browser_diagnostics
@@ -160,15 +166,8 @@ def _settle_ab_page(
         "fallback_wait_used": False,
     }
 
-    try:
-        cli.wait_for_load_state(
-            "networkidle",
-            timeout=AB_NETWORKIDLE_TIMEOUT_S,
-        )
-        settle["networkidle"] = True
-    except Exception:
-        pass
-
+    # DOMContentLoaded before networkidle — SPA sockets often prevent idle,
+    # and racing networkidle first delayed real readiness checks.
     try:
         cli.wait_for_load_state(
             "domcontentloaded",
@@ -177,6 +176,25 @@ def _settle_ab_page(
         settle["domcontentloaded"] = True
     except Exception:
         pass
+
+    try:
+        cli.wait_for_load_state(
+            "networkidle",
+            timeout=AB_NETWORKIDLE_TIMEOUT_S,
+        )
+        settle["networkidle"] = True
+    except Exception:
+        try:
+            cli.wait(int(AB_SCROLL_SETTLE_TIMEOUT_S * 1000))
+        except Exception:
+            time.sleep(AB_SCROLL_SETTLE_TIMEOUT_S)
+        settle["fallback_wait_used"] = True
+
+    # Extra settle so React can attach handlers after networkidle returns.
+    try:
+        cli.wait(200)
+    except Exception:
+        time.sleep(0.2)
 
     if validation_condition is not None:
         cond_type = validation_condition["type"]
@@ -203,9 +221,37 @@ def _settle_ab_page(
                     flush=True,
                 )
 
-    settle["fallback_wait_used"] = not settle["networkidle"]
+    if not settle["fallback_wait_used"]:
+        settle["fallback_wait_used"] = not settle["networkidle"]
 
     return settle
+
+
+def _wait_spa_paint_ready_cli(cli: Any, *, timeout_s: float = 3.0) -> None:
+    """Brief settle so SPA hydration finishes before screenshots (avoids FOUC)."""
+    deadline = time.monotonic() + max(timeout_s, 0.2)
+    last_url = ""
+    stable = 0
+    while time.monotonic() < deadline:
+        try:
+            url = str(cli.get_url() or "")
+        except Exception:
+            url = ""
+        if url and url == last_url:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+            last_url = url
+        try:
+            cli.wait(150)
+        except Exception:
+            time.sleep(0.15)
+    try:
+        cli.wait(100)
+    except Exception:
+        time.sleep(0.1)
 
 
 def _wait_for_ab_element_present(
@@ -506,6 +552,9 @@ def _capture_ab_screenshot(
 ) -> int:
     path = screenshot_dir / f"shot{shot_idx}.png"
     try:
+        # Route changes on SPAs paint styles after DCL; wait out hydration FOUC.
+        _settle_ab_page(cli)
+        _wait_spa_paint_ready_cli(cli)
         cli.screenshot(path)
         attempt_screenshots.append(path)
         step_result[step_result_key] = str(path)
@@ -1661,18 +1710,105 @@ def _step_screenshot_paths(step_result: Dict[str, Any]) -> List[Path]:
     return paths
 
 
+def _manifest_labels_from_results(results: List[Dict[str, Any]]) -> Optional[set[str]]:
+    """If any step carried manifest validation, restrict frames to that journey."""
+    labels: set[str] = set()
+    saw_manifest = False
+    for result in results:
+        step = result.get("step") or {}
+        if str(step.get("validation_source") or "") == "manifest":
+            saw_manifest = True
+        label = str(step.get("label") or "").strip()
+        if label and str(step.get("action") or "") == "click":
+            if str(step.get("validation_source") or "") == "manifest":
+                labels.add(label.lower())
+        if label.lower().startswith("after clicking "):
+            labels.add(label[len("After clicking "):].strip().lower())
+        if label.lower() in {"terminal state", "after goto"}:
+            saw_manifest = saw_manifest or bool(labels)
+    if not saw_manifest:
+        return None
+    return labels
+
+
+def _frame_matches_manifest_entry(
+    *,
+    result: Dict[str, Any],
+    previous: Dict[str, Any],
+    manifest_labels: Optional[set[str]],
+) -> bool:
+    if manifest_labels is None:
+        return True
+    step = result.get("step") or {}
+    prev_step = previous.get("step") or {}
+    candidates = [
+        str(step.get("label") or "").strip().lower(),
+        str(prev_step.get("label") or "").strip().lower(),
+    ]
+    for cand in candidates:
+        if not cand:
+            continue
+        if cand in manifest_labels:
+            return True
+        if cand.startswith("after clicking "):
+            tail = cand[len("after clicking "):].strip()
+            if tail in manifest_labels:
+                return True
+        if cand == "terminal state":
+            return True
+        if cand == "after goto" or str(prev_step.get("action") or "") == "goto":
+            return True
+    # Orphan: screenshot not tied to a manifest click/goto/terminal.
+    return False
+
+
+def _last_approved_click_index(results: List[Dict[str, Any]]) -> int:
+    """Index of the last successful click; frames after it before terminal are orphans."""
+    last = -1
+    for idx, result in enumerate(results):
+        step = result.get("step") or {}
+        if str(step.get("action") or "") != "click":
+            continue
+        if str(result.get("status") or "") != "ok":
+            continue
+        if str(result.get("outcome") or "") != "success":
+            continue
+        last = idx
+    return last
+
+
 def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
+    """Keep one post-action frame per successful milestone; drop pre-terminal orphans."""
     approved: List[str] = []
     seen: set[str] = set()
+    manifest_labels = _manifest_labels_from_results(results)
+    last_click_idx = _last_approved_click_index(results)
+    terminal_reached = any(
+        str((r.get("step") or {}).get("action") or "") == "assert_terminal"
+        and bool(r.get("terminal_condition_reached"))
+        for r in results
+    )
+
+    def _add(path: Path) -> None:
+        raw = str(path)
+        if not raw or raw in seen or not path.exists():
+            return
+        if approved and approved[-1] == raw:
+            return
+        seen.add(raw)
+        approved.append(raw)
+
     for idx, result in enumerate(results):
         if str(result.get("status") or "") != "ok":
             continue
         outcome = str(result.get("outcome") or "")
         step = result.get("step") or {}
         action = str(step.get("action") or "")
+        previous = results[idx - 1] if idx > 0 else {}
         keep = False
+        preferred_keys = ("screenshot_path", "after_screenshot")
+
         if action == "screenshot":
-            previous = results[idx - 1] if idx > 0 else {}
             previous_step = previous.get("step") or {}
             previous_action = str(previous_step.get("action") or "")
             previous_ok = str(previous.get("status") or "") == "ok"
@@ -1681,17 +1817,53 @@ def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
                 outcome == "success"
                 and previous_ok
                 and previous_success
-                and previous_action in {"goto", "click"}
+                and previous_action in {"goto", "click", "assert_terminal"}
             )
+            # Drop frames recorded after the last approved click but before the
+            # terminal condition was verified (wrong intermediate page state).
+            if (
+                keep
+                and last_click_idx >= 0
+                and idx > last_click_idx
+                and previous_action != "assert_terminal"
+                and not terminal_reached
+            ):
+                keep = False
+            if (
+                keep
+                and last_click_idx >= 0
+                and idx > last_click_idx
+                and previous_action not in {"click", "assert_terminal", "goto"}
+            ):
+                keep = False
         elif action == "assert_terminal":
             keep = bool(result.get("terminal_condition_reached"))
+
         if not keep:
             continue
-        for path in _step_screenshot_paths(result):
-            raw = str(path)
-            if raw and raw not in seen and Path(raw).exists():
-                seen.add(raw)
-                approved.append(raw)
+        if not _frame_matches_manifest_entry(
+            result=result,
+            previous=previous,
+            manifest_labels=manifest_labels,
+        ):
+            continue
+
+        chosen: Optional[Path] = None
+        for key in preferred_keys:
+            raw = str(result.get(key) or "").strip()
+            if raw and Path(raw).exists():
+                chosen = Path(raw)
+                break
+        if chosen is None:
+            # Never prefer before_ screenshots — they are pre-transition orphans.
+            for path in _step_screenshot_paths(result):
+                if "before" in path.name.lower() and "after" not in path.name.lower():
+                    continue
+                chosen = path
+                break
+        if chosen is not None:
+            _add(chosen)
+
     return approved
 
 
@@ -1703,7 +1875,11 @@ def _discard_step_screenshots(step_result: Dict[str, Any]) -> None:
 
 def _should_keep_click_screenshots(step_result: Dict[str, Any]) -> bool:
     outcome = str(step_result.get("outcome") or "")
-    return outcome == "success"
+    if outcome == "success":
+        return True
+    if outcome == "unvalidated" and bool(step_result.get("state_changed")):
+        return True
+    return False
 
 
 def _terminal_match_in_snapshot(snapshot: Dict[str, Any], expected: str) -> bool:
@@ -1844,22 +2020,30 @@ def _execute_one(
     action = step.get("action")
     if action == "goto":
         page.goto(_resolve_url(base_url, step.get("url") or "/"), wait_until="domcontentloaded", timeout=15000)
+        # networkidle alone races React hydration on heavy routes (dashboard).
+        wait_stable_after_navigation(page)
+        wait_for_react_hydration(page)
         return True, shot_idx, None
     if action == "click":
         selector = (step.get("selector") or "").strip()
         text = (step.get("label") or step.get("text") or "").strip()
         validation_condition = _extract_validation_condition(step)
+        # Ensure handlers are live before interacting (SPA hydration race).
+        wait_for_react_hydration(page, timeout_ms=4000)
         if selector:
             page.locator(selector).first.click(timeout=8000)
             _wait_for_playwright_validation(page, validation_condition)
+            wait_stable_after_navigation(page, timeout_ms=6000)
             return True, shot_idx, None
         if text:
             page.get_by_text(text, exact=True).first.click(timeout=8000)
             _wait_for_playwright_validation(page, validation_condition)
+            wait_stable_after_navigation(page, timeout_ms=6000)
             return True, shot_idx, None
         return False, shot_idx, "missing_click_target"
     if action == "screenshot":
         path = out_dir / f"shot{shot_idx}.png"
+        wait_spa_ready_for_screenshot(page)
         page.screenshot(path=str(path), full_page=full_page)
         return True, shot_idx + 1, None
     return False, shot_idx, f"unknown_action:{action}"
@@ -1889,6 +2073,7 @@ def run_stepwise(
         page = browser.new_page(viewport={"width": cs.viewport_width, "height": cs.viewport_height})
         page.goto(preview_url, wait_until="domcontentloaded", timeout=15000)
         wait_stable_after_navigation(page)
+        wait_for_react_hydration(page)
         dom_ctx = extract_dom_context(page)
 
         i = 0

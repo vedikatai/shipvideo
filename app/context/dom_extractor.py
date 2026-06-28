@@ -116,25 +116,48 @@ def extract_ab_context(
     return cli.snapshot(save_raw=save_raw)
 
 
+# Catalog payloads may slice lists for prompts, but routes must never be dropped
+# when a page has 60+ interactive nodes (/settings, /admin).
+MAX_INTERACTIVE_ELEMENTS_PER_ROUTE = 50
+
+
 def merge_ab_route_snapshots(
     route_snapshots: Dict[str, AgentBrowserSnapshot],
 ) -> Dict[str, Any]:
     all_elements: List[AgentBrowserElement] = []
     elements_by_route: Dict[str, List[AgentBrowserElement]] = {}
+    elements_by_route_full: Dict[str, List[AgentBrowserElement]] = {}
     snapshot_texts_by_route: Dict[str, str] = {}
+    route_metadata: Dict[str, Dict[str, Any]] = {}
     seen_keys: set = set()
 
     for route, snap in route_snapshots.items():
-        elements_by_route[route] = list(snap["interactive_elements"])
+        # Always retain the route key even when interactive_elements is huge.
+        elements = list(snap.get("interactive_elements") or [])
+        elements_by_route_full[route] = elements
+        truncated = len(elements) > MAX_INTERACTIVE_ELEMENTS_PER_ROUTE
+        catalog_slice = (
+            elements[:MAX_INTERACTIVE_ELEMENTS_PER_ROUTE] if truncated else elements
+        )
+        elements_by_route[route] = catalog_slice
         snapshot_texts_by_route[route] = snap.get("snapshot_text", "")
-        for el in snap["interactive_elements"]:
+        route_metadata[route] = {
+            "current_path": snap.get("current_path") or route,
+            "current_url": snap.get("current_url") or "",
+            "interactive_count": len(elements),
+            "truncated": truncated,
+            "headings": list(snap.get("headings") or [])[:12],
+            "active_surfaces": list(snap.get("active_surfaces") or [])[:8],
+        }
+        # Dedup uses the full set so trailing elements still participate in planning.
+        for el in elements:
             dedup_key = f"{el['role']}:{el['name'].lower().strip()}"
             if dedup_key and dedup_key not in seen_keys:
                 seen_keys.add(dedup_key)
                 all_elements.append(el)
 
     total = sum(
-        len(s["interactive_elements"]) for s in route_snapshots.values()
+        len(s.get("interactive_elements") or []) for s in route_snapshots.values()
     )
 
     return {
@@ -143,5 +166,7 @@ def merge_ab_route_snapshots(
         "unique_elements": len(all_elements),
         "all_elements": all_elements,
         "elements_by_route": elements_by_route,
+        "elements_by_route_full": elements_by_route_full,
         "snapshot_texts_by_route": snapshot_texts_by_route,
+        "route_metadata": route_metadata,
     }

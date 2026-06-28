@@ -348,6 +348,50 @@ def flow_to_steps(flow: ManifestFlow) -> List[Dict[str, Any]]:
     return steps
 
 
+# Hard cap on interactive nodes retained per route in catalog payloads.
+# Above this we still keep the route key + manifest labels so validation
+# does not lose route metadata (silent drop was breaking frame checks).
+MAX_INTERACTIVE_ELEMENTS_PER_ROUTE = 50
+
+
+def _manifest_route_catalog(flow: ManifestFlow) -> Dict[str, Dict[str, Any]]:
+    """Build route metadata that survives large interactive element sets."""
+    labels = [str(label).strip() for label in flow.click_labels if str(label).strip()]
+    # Prefer labels that map to click targets; truncate element-shaped lists only.
+    buttons = [{"text": label, "testid": "", "aria": ""} for label in labels]
+    truncated = False
+    if len(buttons) > MAX_INTERACTIVE_ELEMENTS_PER_ROUTE:
+        buttons = buttons[:MAX_INTERACTIVE_ELEMENTS_PER_ROUTE]
+        truncated = True
+
+    terminal_value = str(flow.terminal_condition.value or "").strip()
+    data_testids: List[str] = []
+    if flow.terminal_condition.type == "element_present" and terminal_value:
+        data_testids.append(terminal_value)
+
+    entry: Dict[str, Any] = {
+        "buttons": buttons,
+        "links": [],
+        "data_testids": data_testids,
+        "manifest_labels": labels,
+        "start_route": flow.start_route,
+        "terminal": {
+            "type": flow.terminal_condition.type,
+            "value": terminal_value,
+        },
+        "truncated": truncated,
+        "interactive_element_cap": MAX_INTERACTIVE_ELEMENTS_PER_ROUTE,
+    }
+    # Always key by start_route and terminal_url when present so downstream
+    # validators can resolve frames even if element lists were truncated.
+    catalog: Dict[str, Dict[str, Any]] = {flow.start_route: dict(entry)}
+    terminal_url = _normalize_route(flow.terminal_url) if flow.terminal_url else ""
+    if terminal_url and terminal_url != flow.start_route:
+        catalog[terminal_url] = dict(entry)
+        catalog[terminal_url]["start_route"] = terminal_url
+    return catalog
+
+
 def flow_to_generation_context(flow: ManifestFlow) -> Dict[str, Any]:
     contract = DemoContract(
         start_route=flow.start_route,
@@ -357,13 +401,15 @@ def flow_to_generation_context(flow: ManifestFlow) -> Dict[str, Any]:
         source_static=True,
         extraction_notes=["manifest_flow_selected"],
     )
+    route_catalog = _manifest_route_catalog(flow)
+    real_routes = list(route_catalog.keys())
     return {
-        "dom_data": {},
+        "dom_data": {"route_snapshots": {}},
         "diffs_for_prompt": [],
-        "real_routes": [flow.start_route],
-        "route_catalog": {},
+        "real_routes": real_routes,
+        "route_catalog": route_catalog,
         "real_inputs": [],
-        "data_testids": [],
+        "data_testids": route_catalog.get(flow.start_route, {}).get("data_testids") or [],
         "changed_testids": [],
         "start_route": flow.start_route,
         "suggested_demo_flow": flow.suggested_demo_flow,
@@ -383,5 +429,8 @@ def flow_to_generation_context(flow: ManifestFlow) -> Dict[str, Any]:
             "name": flow.name,
             "selection_reason": flow.selection_reason,
             "success": flow.raw_success,
+            "click_labels": list(flow.click_labels),
+            "routes": real_routes,
         },
+        "manifest_labels": list(flow.click_labels),
     }

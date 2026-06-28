@@ -475,6 +475,11 @@ def _log_click_stage(stage: str, steps: List[Dict[str, Any]]) -> None:
     )
 
 
+# Soft prompt budget per interactive list; full counts stay in metadata so
+# routes with 60+ controls (/settings, /admin) are not dropped from planning.
+_ROUTE_CATALOG_INTERACTIVE_CAP = 50
+
+
 def _route_snapshot_catalog(
     dom_data: Dict[str, Any],
     *,
@@ -487,30 +492,45 @@ def _route_snapshot_catalog(
         buttons = route_dom.get("buttons") or []
         links = route_dom.get("links") or []
         data_testids = route_dom.get("data_testids") or []
+        button_entries = [
+            {
+                "text": (btn.get("text") or "").strip(),
+                "selector": (btn.get("selector") or "").strip(),
+                "testid": (btn.get("testid") or "").strip(),
+                "aria": (btn.get("aria") or "").strip(),
+            }
+            for btn in buttons
+            if (btn.get("text") or btn.get("selector") or "").strip()
+        ]
+        link_entries = [
+            {
+                "text": (link.get("text") or "").strip(),
+                "href": (link.get("href") or "").strip(),
+            }
+            for link in links
+            if (link.get("text") or "").strip()
+        ]
+        testid_entries = [
+            (item.get("testid") or "").strip()
+            for item in data_testids
+            if (item.get("testid") or "").strip()
+        ]
+        interactive_total = len(button_entries) + len(link_entries)
+        truncated = interactive_total > _ROUTE_CATALOG_INTERACTIVE_CAP
+        # Prefer buttons first (demo clicks), then links, within the soft cap.
+        remaining = _ROUTE_CATALOG_INTERACTIVE_CAP
+        capped_buttons = button_entries[:remaining]
+        remaining -= len(capped_buttons)
+        capped_links = link_entries[: max(remaining, 0)]
         catalog[route] = {
-            "buttons": [
-                {
-                    "text": (btn.get("text") or "").strip(),
-                    "selector": (btn.get("selector") or "").strip(),
-                    "testid": (btn.get("testid") or "").strip(),
-                    "aria": (btn.get("aria") or "").strip(),
-                }
-                for btn in buttons
-                if (btn.get("text") or btn.get("selector") or "").strip()
-            ][:20],
-            "links": [
-                {
-                    "text": (link.get("text") or "").strip(),
-                    "href": (link.get("href") or "").strip(),
-                }
-                for link in links
-                if (link.get("text") or "").strip()
-            ][:20],
-            "data_testids": [
-                (item.get("testid") or "").strip()
-                for item in data_testids
-                if (item.get("testid") or "").strip()
-            ][:20],
+            "buttons": capped_buttons,
+            "links": capped_links,
+            "data_testids": testid_entries[:_ROUTE_CATALOG_INTERACTIVE_CAP],
+            "interactive_total": interactive_total,
+            "button_total": len(button_entries),
+            "link_total": len(link_entries),
+            "truncated": truncated,
+            "interactive_element_cap": _ROUTE_CATALOG_INTERACTIVE_CAP,
         }
     return catalog
 
@@ -690,6 +710,63 @@ def _ensure_screenshots_for_visited_pages(
             else "Auto-captured state after interaction"
         )
         out.append({"action": "screenshot", "label": auto_label})
+    return out
+
+
+def _sanitize_terminal_assertions(
+    steps: List[Dict[str, Any]],
+    *,
+    contract: Optional[Any] = None,
+    real_data_testids: Optional[List[Any]] = None,
+    diff_text: str = "",
+) -> List[Dict[str, Any]]:
+    """Drop assert_terminal steps that are not grounded in contract/DOM/diff."""
+    terminal = getattr(contract, "terminal", None) if contract is not None else None
+    contract_value = ""
+    if terminal is not None:
+        contract_value = str(getattr(terminal, "value", "") or "").strip().lower()
+
+    known_testids = set()
+    for item in real_data_testids or []:
+        if isinstance(item, dict):
+            tid = str(item.get("testid") or "").strip().lower()
+        else:
+            tid = str(item or "").strip().lower()
+        if tid:
+            known_testids.add(tid)
+
+    diff_lower = (diff_text or "").lower()
+    out: List[Dict[str, Any]] = []
+    for step in steps:
+        if not isinstance(step, dict) or step.get("action") != "assert_terminal":
+            out.append(step)
+            continue
+
+        condition = step.get("condition") if isinstance(step.get("condition"), dict) else {}
+        expected = (
+            str(condition.get("value") or "").strip()
+            or str(step.get("expected_element") or "").strip()
+            or str(step.get("expected_text") or "").strip()
+            or str(step.get("expected_url") or "").strip()
+        )
+        expected_l = expected.lower()
+        if not expected_l:
+            continue
+
+        grounded = False
+        if contract_value and (
+            expected_l == contract_value
+            or contract_value in expected_l
+            or expected_l in contract_value
+        ):
+            grounded = True
+        if expected_l in known_testids:
+            grounded = True
+        if expected_l and expected_l in diff_lower:
+            grounded = True
+
+        if grounded:
+            out.append(step)
     return out
 
 

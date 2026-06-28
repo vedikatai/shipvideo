@@ -35,7 +35,25 @@ async def _discover_routes(page, staging_url: str) -> List[str]:
     try:
         print(f"[dom] discovering routes url={staging_url}", flush=True)
         await page.goto(staging_url, timeout=15000)
-        await page.wait_for_load_state("networkidle")
+        await page.wait_for_load_state("domcontentloaded")
+        try:
+            await page.wait_for_load_state("networkidle")
+        except Exception:
+            pass
+        # React hydration often lags networkidle on heavy SPAs (dashboard).
+        try:
+            await page.evaluate(
+                """async () => {
+                    if (document.fonts && document.fonts.ready) {
+                        await document.fonts.ready;
+                    }
+                    await new Promise((r) =>
+                        requestAnimationFrame(() => requestAnimationFrame(r))
+                    );
+                }"""
+            )
+        except Exception:
+            pass
 
         links = await page.eval_on_selector_all(
             "a[href]",
@@ -223,7 +241,24 @@ async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
     try:
         print(f"[dom] collecting UI elements url={url}", flush=True)
         await page.goto(url, timeout=15000)
-        await page.wait_for_load_state("networkidle")
+        await page.wait_for_load_state("domcontentloaded")
+        try:
+            await page.wait_for_load_state("networkidle")
+        except Exception:
+            pass
+        try:
+            await page.evaluate(
+                """async () => {
+                    if (document.fonts && document.fonts.ready) {
+                        await document.fonts.ready;
+                    }
+                    await new Promise((r) =>
+                        requestAnimationFrame(() => requestAnimationFrame(r))
+                    );
+                }"""
+            )
+        except Exception:
+            pass
         result = await _extract_ui_from_current_page(page)
         print(
             f"[dom] buttons={len(result.get('buttons', []))} "

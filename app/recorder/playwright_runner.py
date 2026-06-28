@@ -115,6 +115,35 @@ def run_script(
 
             try:
                 page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
+                # SPA hydration can lag networkidle/DCL; wait fonts + React handlers.
+                try:
+                    page.evaluate(
+                        """async () => {
+                            if (document.fonts && document.fonts.ready) {
+                                await document.fonts.ready;
+                            }
+                            await new Promise((r) =>
+                                requestAnimationFrame(() => requestAnimationFrame(r))
+                            );
+                            const root = document.getElementById('root')
+                                || document.getElementById('__next')
+                                || document.getElementById('app')
+                                || document.body;
+                            if (!root) return;
+                            const deadline = Date.now() + 4000;
+                            while (Date.now() < deadline) {
+                                const interactive = root.querySelector(
+                                    'button, a[href], input, [role="button"], [data-testid]'
+                                );
+                                if (interactive && (root.textContent || '').trim()) {
+                                    return;
+                                }
+                                await new Promise((r) => setTimeout(r, 50));
+                            }
+                        }"""
+                    )
+                except Exception:
+                    time.sleep(0.25)
                 _log("script_runner.started", {"base_url": base_url})
 
 

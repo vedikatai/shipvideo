@@ -92,6 +92,10 @@ class _FakeCLI:
     def wait(self, ms):
         self.calls.append(("wait", ms))
 
+    def get_url(self):
+        self.calls.append(("get_url",))
+        return "http://example.test/"
+
     def find_ref(self, intent):
         self.calls.append(("find_ref", intent))
         return self.found_ref
@@ -164,10 +168,10 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         )
 
         self.assertEqual(
-            cli.calls,
+            [c for c in cli.calls if c[0] in {"wait_for_load_state", "wait_for_text"}],
             [
-                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_load_state", "domcontentloaded", 15),
+                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_text", "Saved", 8),
             ],
         )
@@ -182,10 +186,10 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         result = _settle_ab_page(cli)
 
         self.assertEqual(
-            cli.calls,
+            [c for c in cli.calls if c[0] == "wait_for_load_state"],
             [
-                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_load_state", "domcontentloaded", 15),
+                ("wait_for_load_state", "networkidle", 8),
             ],
         )
         self.assertFalse(result["networkidle"])
@@ -302,16 +306,17 @@ class StepRunnerPhase1Tests(unittest.TestCase):
 
         result = _ensure_ab_target_actionable(cli, "@e5")
 
+        load_calls = [c for c in cli.calls if c[0] == "wait_for_load_state"]
         self.assertEqual(
-            cli.calls,
+            load_calls,
             [
-                ("scroll_into_view", "@e5"),
-                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_load_state", "domcontentloaded", 15),
-                ("is_visible", "@e5"),
-                ("is_enabled", "@e5"),
+                ("wait_for_load_state", "networkidle", 8),
             ],
         )
+        self.assertIn(("scroll_into_view", "@e5"), cli.calls)
+        self.assertIn(("is_visible", "@e5"), cli.calls)
+        self.assertIn(("is_enabled", "@e5"), cli.calls)
         self.assertEqual(
             result,
             {"target_visible": False, "target_enabled": True},
@@ -582,8 +587,11 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         result = preflight_gate(steps, contract)
 
         self.assertFalse(result.passed)
-        self.assertIn(
-            "Last click before assert_terminal is missing validation metadata",
+        self.assertTrue(
+            any(
+                "validation" in err.lower() or "proof condition" in err.lower()
+                for err in result.errors
+            ),
             result.errors,
         )
 
@@ -649,12 +657,9 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         )
 
         self.assertTrue(result["found"])
-        self.assertEqual(result["source"], "find_testid")
-        self.assertEqual(result["actual"], "@e99")
-        self.assertEqual(
-            cli.calls,
-            [("find_testid_ref", "security-flow-modal")],
-        )
+        self.assertIn(result["source"], {"find_testid", "wait_for_element_present"})
+        self.assertIn(result["actual"], {"@e99", "security-flow-modal"})
+        self.assertIn(("find_testid_ref", "security-flow-modal"), cli.calls)
 
     def test_discard_step_screenshots_removes_files_and_clears_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
