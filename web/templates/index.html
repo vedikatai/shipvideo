@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ShipVideo — Link to journey video</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div class="badge"><span class="dot"></span> Open source · Playwright · FFmpeg · FastAPI</div>
+      <h1>Paste a link.<br /><span>Get the whole journey video.</span></h1>
+      <p class="sub">
+        ShipVideo opens your URL, walks clickable paths toward the end of the flow,
+        captures each screen, and stitches a subtitled demo so you can see exactly
+        how you reached the finish.
+      </p>
+    </header>
+
+    <section class="panel">
+      <form id="demo-form" class="form-row" autocomplete="off">
+        <input id="url" name="url" type="url" required placeholder="https://example.com or your staging app" />
+        <button class="primary" id="submit" type="submit">Generate video</button>
+      </form>
+      <div class="meta-row">
+        <label>Max steps
+          <select id="max-steps">
+            <option value="6">6</option>
+            <option value="8">8</option>
+            <option value="10" selected>10</option>
+            <option value="12">12</option>
+            <option value="15">15</option>
+          </select>
+        </label>
+        <span class="status-pill queued" id="status">idle</span>
+        <span id="stage-label" style="color:var(--muted);font-size:0.85rem"></span>
+      </div>
+      <div class="progress" aria-hidden="true"><i id="progress-bar"></i></div>
+      <div class="err" id="err"></div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>How you reached the end</h2>
+        <ul class="timeline" id="timeline"></ul>
+      </div>
+      <div class="panel">
+        <h2>Video + subtitles</h2>
+        <div class="video-shell">
+          <div class="placeholder" id="placeholder">
+            Your subtitled journey video will play here after generation finishes.
+          </div>
+          <video id="video" controls playsinline style="display:none"></video>
+        </div>
+        <div class="actions" id="actions"></div>
+      </div>
+    </section>
+
+    <footer>
+      <p>
+        Stack: <code>Playwright</code> (browser capture), <code>FFmpeg</code> (slideshow + burned-in ASS subtitles),
+        <code>FastAPI</code> (API + site). Sidecar <code>.srt</code> is downloadable for editors.
+        Run locally: <code>uvicorn app.product_web:app --host 0.0.0.0 --port 8080</code>
+      </p>
+    </footer>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
