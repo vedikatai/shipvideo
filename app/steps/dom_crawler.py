@@ -34,8 +34,8 @@ def _is_auth_wall(url: str) -> bool:
 async def _discover_routes(page, staging_url: str) -> List[str]:
     try:
         print(f"[dom] discovering routes url={staging_url}", flush=True)
-        await page.goto(staging_url, timeout=15000)
-        await page.wait_for_load_state("networkidle")
+        await page.goto(staging_url, timeout=15000, wait_until="domcontentloaded")
+        await page.wait_for_load_state("domcontentloaded")
 
         links = await page.eval_on_selector_all(
             "a[href]",
@@ -222,8 +222,8 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
 async def _collect_ui_elements(page, url: str) -> Dict[str, Any]:
     try:
         print(f"[dom] collecting UI elements url={url}", flush=True)
-        await page.goto(url, timeout=15000)
-        await page.wait_for_load_state("networkidle")
+        await page.goto(url, timeout=15000, wait_until="domcontentloaded")
+        await page.wait_for_load_state("domcontentloaded")
         result = await _extract_ui_from_current_page(page)
         print(
             f"[dom] buttons={len(result.get('buttons', []))} "
@@ -331,7 +331,7 @@ async def crawl_dom_data(
                         await page.goto(
                             full_url,
                             timeout=12000,
-                            wait_until="networkidle",
+                            wait_until="domcontentloaded",
                         )
 
 

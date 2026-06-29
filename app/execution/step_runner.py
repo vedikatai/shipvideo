@@ -162,19 +162,19 @@ def _settle_ab_page(
 
     try:
         cli.wait_for_load_state(
-            "networkidle",
-            timeout=AB_NETWORKIDLE_TIMEOUT_S,
+            "domcontentloaded",
+            timeout=AB_DOMCONTENTLOADED_TIMEOUT_S,
         )
-        settle["networkidle"] = True
+        settle["domcontentloaded"] = True
     except Exception:
         pass
 
     try:
         cli.wait_for_load_state(
-            "domcontentloaded",
-            timeout=AB_DOMCONTENTLOADED_TIMEOUT_S,
+            "networkidle",
+            timeout=min(AB_NETWORKIDLE_TIMEOUT_S, 1),
         )
-        settle["domcontentloaded"] = True
+        settle["networkidle"] = True
     except Exception:
         pass
 

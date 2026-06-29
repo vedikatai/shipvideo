@@ -166,8 +166,8 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         self.assertEqual(
             cli.calls,
             [
-                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_load_state", "domcontentloaded", 15),
+                ("wait_for_load_state", "networkidle", 1),
                 ("wait_for_text", "Saved", 8),
             ],
         )
@@ -184,8 +184,8 @@ class StepRunnerPhase1Tests(unittest.TestCase):
         self.assertEqual(
             cli.calls,
             [
-                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_load_state", "domcontentloaded", 15),
+                ("wait_for_load_state", "networkidle", 1),
             ],
         )
         self.assertFalse(result["networkidle"])
@@ -306,8 +306,8 @@ class StepRunnerPhase1Tests(unittest.TestCase):
             cli.calls,
             [
                 ("scroll_into_view", "@e5"),
-                ("wait_for_load_state", "networkidle", 8),
                 ("wait_for_load_state", "domcontentloaded", 15),
+                ("wait_for_load_state", "networkidle", 1),
                 ("is_visible", "@e5"),
                 ("is_enabled", "@e5"),
             ],
