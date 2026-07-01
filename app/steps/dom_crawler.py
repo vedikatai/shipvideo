@@ -104,10 +104,11 @@ def _build_visit_order(
 
 
 
-MAX_ITEMS_BUTTONS = 40                                             
-MAX_ITEMS_LINKS   = 30                   
-MAX_ITEMS_INPUTS  = 20
-MAX_ITEMS_TESTIDS = 40                                             
+# Raised so pages with 60+ interactives are not silently half-walked.
+MAX_ITEMS_BUTTONS = 120
+MAX_ITEMS_LINKS   = 120
+MAX_ITEMS_INPUTS  = 60
+MAX_ITEMS_TESTIDS = 120
 
 
 def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
@@ -129,7 +130,7 @@ def _short_selector(meta: Dict[str, Any], fallback_tag: str) -> str:
 async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
     buttons = await page.eval_on_selector_all(
         "button, [role='button'], input[type='button'], input[type='submit']",
-        """els => els.slice(0, 100).map(e => ({
+        """els => els.slice(0, 200).map(e => ({
             text: (e.innerText || e.value || "").trim().slice(0, 80),
             testid: e.getAttribute('data-testid') || "",
             aria: e.getAttribute('aria-label') || "",
@@ -139,7 +140,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
     )
     links = await page.eval_on_selector_all(
         "a[href]",
-        """els => els.slice(0, 60).map(e => ({
+        """els => els.slice(0, 200).map(e => ({
             text: (e.innerText || "").trim().slice(0, 80),
             href: e.getAttribute('href') || "",
             testid: e.getAttribute('data-testid') || "",
@@ -150,7 +151,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
     )
     inputs = await page.eval_on_selector_all(
         "input, textarea, select",
-        """els => els.slice(0, 40).map(e => ({
+        """els => els.slice(0, 120).map(e => ({
             placeholder: (e.getAttribute('placeholder') || "").slice(0, 60),
             name: (e.getAttribute('name') || "").slice(0, 60),
             type: e.getAttribute('type') || "",
@@ -162,7 +163,7 @@ async def _extract_ui_from_current_page(page) -> Dict[str, Any]:
     )
     data_testid_els = await page.eval_on_selector_all(
         "[data-testid]",
-        """els => els.slice(0, 100).map(e => ({
+        """els => els.slice(0, 200).map(e => ({
             testid: e.getAttribute('data-testid') || "",
             tag: e.tagName.toLowerCase(),
             text: (e.innerText || "").trim().slice(0, 60)

@@ -475,6 +475,21 @@ def _log_click_stage(stage: str, steps: List[Dict[str, Any]]) -> None:
     )
 
 
+# Per-page interactive entries in the planner prompt. Pages with 60+ controls
+# used to be hard-truncated at 20 buttons + 20 links; we paginate instead so the
+# model sees every element across pages without one giant silent truncate.
+_ROUTE_CATALOG_PAGE_SIZE = 40
+
+
+def _paginate_entries(entries: List[Any], page_size: int = _ROUTE_CATALOG_PAGE_SIZE) -> List[List[Any]]:
+    if not entries:
+        return [[]]
+    pages: List[List[Any]] = []
+    for i in range(0, len(entries), page_size):
+        pages.append(entries[i : i + page_size])
+    return pages
+
+
 def _route_snapshot_catalog(
     dom_data: Dict[str, Any],
     *,
@@ -487,30 +502,43 @@ def _route_snapshot_catalog(
         buttons = route_dom.get("buttons") or []
         links = route_dom.get("links") or []
         data_testids = route_dom.get("data_testids") or []
+        button_entries = [
+            {
+                "text": (btn.get("text") or "").strip(),
+                "selector": (btn.get("selector") or "").strip(),
+                "testid": (btn.get("testid") or "").strip(),
+                "aria": (btn.get("aria") or "").strip(),
+            }
+            for btn in buttons
+            if (btn.get("text") or btn.get("selector") or "").strip()
+        ]
+        link_entries = [
+            {
+                "text": (link.get("text") or "").strip(),
+                "href": (link.get("href") or "").strip(),
+            }
+            for link in links
+            if (link.get("text") or "").strip()
+        ]
+        testid_entries = [
+            (item.get("testid") or "").strip()
+            for item in data_testids
+            if (item.get("testid") or "").strip()
+        ]
+        # Combined interactive list for pagination (buttons first — demo clicks).
+        interactive = (
+            [{"kind": "button", **b} for b in button_entries]
+            + [{"kind": "link", **lnk} for lnk in link_entries]
+        )
+        pages = _paginate_entries(interactive, _ROUTE_CATALOG_PAGE_SIZE)
         catalog[route] = {
-            "buttons": [
-                {
-                    "text": (btn.get("text") or "").strip(),
-                    "selector": (btn.get("selector") or "").strip(),
-                    "testid": (btn.get("testid") or "").strip(),
-                    "aria": (btn.get("aria") or "").strip(),
-                }
-                for btn in buttons
-                if (btn.get("text") or btn.get("selector") or "").strip()
-            ][:20],
-            "links": [
-                {
-                    "text": (link.get("text") or "").strip(),
-                    "href": (link.get("href") or "").strip(),
-                }
-                for link in links
-                if (link.get("text") or "").strip()
-            ][:20],
-            "data_testids": [
-                (item.get("testid") or "").strip()
-                for item in data_testids
-                if (item.get("testid") or "").strip()
-            ][:20],
+            "buttons": button_entries,
+            "links": link_entries,
+            "data_testids": testid_entries,
+            "interactive_total": len(interactive),
+            "interactive_pages": pages,
+            "interactive_page_size": _ROUTE_CATALOG_PAGE_SIZE,
+            "interactive_page_count": len(pages),
         }
     return catalog
 
@@ -906,6 +934,8 @@ def _build_planning_prompt(
         "• Last meaningful step must be assert_terminal with the terminal condition.\n"
         "• Use ONLY routes from real_routes for goto.\n"
         "• Plan route-by-route. A click is valid only if it exists on the CURRENT route in route_catalog.\n"
+        "• route_catalog may include interactive_pages (paginated lists). Use every page — "
+        "do not stop at the first page when interactive_total > interactive_page_size.\n"
         "• After a goto, the CURRENT route becomes that url. If you click a link, assume navigation only when that link is listed for the CURRENT route.\n"
         "• For click steps use exact visible label from the CURRENT route's buttons/links.\n"
         "• Put visible targets in `label`, not `selector` or `text`.\n"

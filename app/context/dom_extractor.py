@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from app.browser.agent_browser_cli import AgentBrowserCLI
 
 
-def extract_dom_context(page: Page, *, max_items: int = 40) -> DomSnapshot:
+def extract_dom_context(page: Page, *, max_items: int = 120) -> DomSnapshot:
     current_path = page.evaluate("() => window.location.pathname || '/'")
 
     buttons = page.eval_on_selector_all(

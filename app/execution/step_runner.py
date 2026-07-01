@@ -1662,8 +1662,28 @@ def _step_screenshot_paths(step_result: Dict[str, Any]) -> List[Path]:
 
 
 def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
+    """
+    Build the ordered milestone frame list for render.
+
+    Manifest-first render uses one hold per approved path. Dropping the closing
+    milestone (last step's post-action / terminal frame) shortens the mp4 and
+    hides the ending state — a race when we only accepted screenshot steps after
+    goto/click and ignored assert_terminal tails.
+    """
     approved: List[str] = []
     seen: set[str] = set()
+
+    def _add(path: Path) -> None:
+        raw = str(path)
+        if not raw or raw in seen:
+            return
+        if not path.exists():
+            return
+        # Allow consecutive identical paths only for the explicit closing
+        # re-append below (dedupe within the main loop).
+        seen.add(raw)
+        approved.append(raw)
+
     for idx, result in enumerate(results):
         if str(result.get("status") or "") != "ok":
             continue
@@ -1671,27 +1691,79 @@ def _approved_frame_paths(results: List[Dict[str, Any]]) -> List[str]:
         step = result.get("step") or {}
         action = str(step.get("action") or "")
         keep = False
+        # Prefer post-action stills; before_* are pre-transition and must not
+        # replace the closing milestone when both exist.
+        preferred_keys = ("screenshot_path", "after_screenshot")
+
         if action == "screenshot":
             previous = results[idx - 1] if idx > 0 else {}
             previous_step = previous.get("step") or {}
             previous_action = str(previous_step.get("action") or "")
             previous_ok = str(previous.get("status") or "") == "ok"
             previous_success = str(previous.get("outcome") or "") == "success"
+            # Include assert_terminal so a dedicated closing screenshot after the
+            # terminal check is kept (manifest closing milestone).
             keep = (
                 outcome == "success"
                 and previous_ok
                 and previous_success
-                and previous_action in {"goto", "click"}
+                and previous_action in {"goto", "click", "assert_terminal"}
             )
         elif action == "assert_terminal":
             keep = bool(result.get("terminal_condition_reached"))
+        elif action in {"goto", "click"} and outcome == "success":
+            # Clicks/gotos may carry after_screenshot without a follow-up
+            # screenshot step; keep that still as a milestone frame.
+            keep = True
+            preferred_keys = ("after_screenshot", "screenshot_path")
+
         if not keep:
             continue
-        for path in _step_screenshot_paths(result):
-            raw = str(path)
-            if raw and raw not in seen and Path(raw).exists():
-                seen.add(raw)
-                approved.append(raw)
+
+        added = False
+        for key in preferred_keys:
+            raw = str(result.get(key) or "").strip()
+            if not raw:
+                continue
+            p = Path(raw)
+            if p.exists() and raw not in seen:
+                _add(p)
+                added = True
+                break
+        if not added:
+            for path in _step_screenshot_paths(result):
+                if str(path) not in seen and path.exists():
+                    _add(path)
+                    break
+
+    # Tail-off fix: always re-append the last successful terminal / last-step
+    # frame so intermittent prefer/dedupe never drops the closing milestone.
+    for result in reversed(results):
+        if str(result.get("status") or "") != "ok":
+            continue
+        step = result.get("step") or {}
+        action = str(step.get("action") or "")
+        if action == "assert_terminal" and result.get("terminal_condition_reached"):
+            for key in ("screenshot_path", "after_screenshot"):
+                raw = str(result.get(key) or "").strip()
+                if raw and Path(raw).exists():
+                    # Force closing frame at the tail even if earlier logic missed it.
+                    if not approved or approved[-1] != raw:
+                        approved.append(raw)
+                    return approved
+        if action == "screenshot" and str(result.get("outcome") or "") == "success":
+            raw = str(result.get("screenshot_path") or result.get("after_screenshot") or "").strip()
+            if raw and Path(raw).exists():
+                if not approved or approved[-1] != raw:
+                    approved.append(raw)
+                return approved
+        if action in {"click", "goto"} and str(result.get("outcome") or "") == "success":
+            raw = str(result.get("after_screenshot") or result.get("screenshot_path") or "").strip()
+            if raw and Path(raw).exists():
+                if not approved or approved[-1] != raw:
+                    approved.append(raw)
+                return approved
+
     return approved
 
 

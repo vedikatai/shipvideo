@@ -289,6 +289,53 @@ def _call_llm_simple(prompt: str) -> str:
         return ""
 
 
+# Soft per-call ceiling: beyond ~40–50 entries the model silently omits
+# trailing elements. Batch so pages with 60+ interactives are fully classified.
+_LLM_ELEMENT_BATCH_SIZE = 40
+
+
+async def _find_ref_in_element_batch(
+    *,
+    intent: str,
+    batch: List[Dict[str, str]],
+    batch_index: int,
+    total_batches: int,
+) -> Optional[str]:
+    elements_text = "\n".join(
+        f"ref={el.get('ref')} role={el.get('role')} name={el.get('name')}"
+        for el in batch
+    )
+    batch_note = ""
+    if total_batches > 1:
+        batch_note = (
+            f"\nThis is batch {batch_index + 1} of {total_batches} "
+            f"({len(batch)} elements in this batch). "
+            "Only choose from this batch; return none if the best match is not here.\n"
+        )
+    prompt = f"""
+You are selecting a UI element to click.
+
+Intent: "{intent}"
+{batch_note}
+Available interactive elements:
+{elements_text}
+
+Return only the ref string (e.g. "e10") of the best matching element.
+If no element matches the intent, return "none".
+No prose. No explanation. Just the ref or "none".
+"""
+    response = _call_llm_simple(prompt)
+    ref = (response or "").strip().strip('"').strip("'")
+    if not ref or ref.lower() == "none":
+        return None
+    if not ref.startswith("@"):
+        ref = f"@{ref}"
+    valid_refs = {str(e.get("ref") or "").strip() for e in batch}
+    if ref in valid_refs:
+        return ref
+    return None
+
+
 async def find_ref_with_llm(
     *,
     intent: str,
@@ -306,33 +353,33 @@ async def find_ref_with_llm(
     if not compact_interactive:
         return None
 
-    elements_text = "\n".join(
-        [
-            f"ref={el.get('ref')} role={el.get('role')} name={el.get('name')}"
-            for el in compact_interactive
-        ]
-    )
-    prompt = f"""
-You are selecting a UI element to click.
+    import re
 
-Intent: "{intent}"
+    intent_tokens = {
+        tok for tok in re.findall(r"[a-z0-9]+", intent.lower()) if len(tok) > 1
+    }
 
-Available interactive elements:
-{elements_text}
+    def _rank_key(el: Dict[str, str]) -> tuple:
+        name = str(el.get("name") or "").lower()
+        role = str(el.get("role") or "").lower()
+        blob = f"{name} {role}"
+        overlap = sum(1 for tok in intent_tokens if tok in blob)
+        return (-overlap, name)
 
-Return only the ref string (e.g. "e10") of the best matching element.
-If no element matches the intent, return "none".
-No prose. No explanation. Just the ref or "none".
-"""
-    response = _call_llm_simple(prompt)
-    ref = (response or "").strip().strip('"').strip("'")
-    if not ref or ref.lower() == "none":
-        return None
-    if not ref.startswith("@"):
-        ref = f"@{ref}"
-    valid_refs = {str(e.get("ref") or "").strip() for e in compact_interactive}
-    if ref in valid_refs:
-        return ref
+    ordered = sorted(compact_interactive, key=_rank_key)
+    batch_size = _LLM_ELEMENT_BATCH_SIZE
+    total_batches = (len(ordered) + batch_size - 1) // batch_size
+    for batch_index in range(total_batches):
+        start = batch_index * batch_size
+        batch = ordered[start : start + batch_size]
+        ref = await _find_ref_in_element_batch(
+            intent=intent,
+            batch=batch,
+            batch_index=batch_index,
+            total_batches=total_batches,
+        )
+        if ref:
+            return ref
     return None
 
 
